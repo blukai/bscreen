@@ -1,0 +1,18 @@
+[package]
+name = "bscreen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+env_logger = "0.11"
+libc = "0.2.168"
+log = "0.4"
+wayland-backend = { version = "0.3", features = ["dlopen", "client_system"] }
+wayland-client = { version = "0.31", features = ["log"] }
+wayland-egl = "0.32"
+wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+[build-dependencies]
+gl_generator = "0.14"
