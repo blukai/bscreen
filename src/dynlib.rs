@@ -1,11 +1,13 @@
-use std::{ffi::CString, mem::transmute_copy, ptr::NonNull};
+use std::ffi::CString;
+use std::mem::transmute_copy;
+use std::ptr::NonNull;
 
 use libc::{c_void, dlclose, dlerror, dlopen, dlsym};
 
-pub struct DynLib(NonNull<c_void>);
+pub(crate) struct DynLib(NonNull<c_void>);
 
 impl DynLib {
-    pub fn open(filename: &[u8]) -> Result<Self, String> {
+    pub(crate) fn open(filename: &[u8]) -> Result<Self, String> {
         unsafe {
             let handle = dlopen(filename.as_ptr() as _, libc::RTLD_LAZY);
 
@@ -19,7 +21,7 @@ impl DynLib {
         }
     }
 
-    pub fn lookup<F: Sized>(&self, name: &[u8]) -> Result<F, String> {
+    pub(crate) fn lookup<F: Sized>(&self, name: &[u8]) -> Result<F, String> {
         unsafe {
             _ = dlerror();
 
@@ -42,3 +44,14 @@ impl Drop for DynLib {
         }
     }
 }
+
+macro_rules! opaque_struct {
+    ($name:ident) => {
+        #[repr(C)]
+        pub(crate) struct $name {
+            _data: [u8; 0],
+            _marker: PhantomData<(*mut u8, PhantomPinned)>,
+        }
+    };
+}
+pub(crate) use opaque_struct;

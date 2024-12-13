@@ -1,13 +1,12 @@
-use std::{
-    ffi::{c_char, c_void},
-    mem::zeroed,
-    ops::Deref,
-    ptr::{null, null_mut},
-};
+use std::ffi::{c_char, c_void};
+use std::mem::zeroed;
+use std::ops::Deref;
+use std::ptr::{null, null_mut};
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, Context as _};
 
-use crate::{dynlib::DynLib, gl::GlTexture2D};
+use crate::dynlib::DynLib;
+use crate::gl::Texture2D;
 
 pub mod sys {
     #[allow(non_camel_case_types)]
@@ -37,11 +36,11 @@ pub mod sys {
 }
 
 #[derive(Debug)]
-pub enum EglError {
+pub enum Error {
     Raw(sys::types::EGLenum),
 }
 
-impl std::fmt::Display for EglError {
+impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Raw(raw) => write!(f, "egl error 0x{:x}", raw),
@@ -49,14 +48,14 @@ impl std::fmt::Display for EglError {
     }
 }
 
-impl std::error::Error for EglError {}
+impl std::error::Error for Error {}
 
-pub struct Egl {
+pub struct Lib {
     _lib: DynLib,
     egl: sys::Egl,
 }
 
-impl Deref for Egl {
+impl Deref for Lib {
     type Target = sys::Egl;
 
     fn deref(&self) -> &Self::Target {
@@ -64,7 +63,7 @@ impl Deref for Egl {
     }
 }
 
-impl Egl {
+impl Lib {
     pub unsafe fn load() -> Result<Self, String> {
         let lib = DynLib::open(b"libEGL.so\0").or_else(|_| DynLib::open(b"libEGL.so.1\0"))?;
 
@@ -84,29 +83,29 @@ impl Egl {
         Ok(Self { _lib: lib, egl })
     }
 
-    pub fn unwrap_err(&self) -> EglError {
+    pub fn unwrap_err(&self) -> Error {
         match unsafe { self.GetError() } as sys::types::EGLenum {
             sys::SUCCESS => unreachable!(),
-            raw => EglError::Raw(raw),
+            raw => Error::Raw(raw),
         }
     }
 }
 
-pub struct EglContext {
-    egl: &'static Egl,
+pub struct Context {
+    egl_lib: &'static Lib,
     pub display: sys::types::EGLDisplay,
     pub config: sys::types::EGLConfig,
     pub context: sys::types::EGLContext,
 }
 
-impl EglContext {
+impl Context {
     pub unsafe fn make_current_surfaceless(&self) -> anyhow::Result<()> {
         if self
-            .egl
+            .egl_lib
             .MakeCurrent(self.display, sys::NO_SURFACE, sys::NO_SURFACE, self.context)
             == sys::FALSE
         {
-            Err(self.egl.unwrap_err()).context("could not make current")
+            Err(self.egl_lib.unwrap_err()).context("could not make current")
         } else {
             Ok(())
         }
@@ -114,40 +113,40 @@ impl EglContext {
 
     pub unsafe fn make_current(&self, surface: sys::types::EGLSurface) -> anyhow::Result<()> {
         if self
-            .egl
+            .egl_lib
             .MakeCurrent(self.display, surface, surface, self.context)
             == sys::FALSE
         {
-            Err(self.egl.unwrap_err()).context("could not make current")
+            Err(self.egl_lib.unwrap_err()).context("could not make current")
         } else {
             Ok(())
         }
     }
 
     pub unsafe fn swap_buffers(&self, surface: sys::types::EGLSurface) -> anyhow::Result<()> {
-        if self.egl.SwapBuffers(self.display, surface) == sys::FALSE {
-            Err(self.egl.unwrap_err()).context("could not swap buffers")
+        if self.egl_lib.SwapBuffers(self.display, surface) == sys::FALSE {
+            Err(self.egl_lib.unwrap_err()).context("could not swap buffers")
         } else {
             Ok(())
         }
     }
 
     pub unsafe fn create(
-        egl: &'static Egl,
+        egl_lib: &'static Lib,
         display_id: sys::EGLNativeDisplayType,
     ) -> anyhow::Result<Self> {
-        if egl.BindAPI(sys::OPENGL_ES_API) == sys::FALSE {
-            return Err(egl.unwrap_err()).context("could not bind api");
+        if egl_lib.BindAPI(sys::OPENGL_ES_API) == sys::FALSE {
+            return Err(egl_lib.unwrap_err()).context("could not bind api");
         }
 
-        let display = egl.GetDisplay(display_id);
+        let display = egl_lib.GetDisplay(display_id);
         if display == sys::NO_DISPLAY {
-            return Err(egl.unwrap_err()).context("could not get display");
+            return Err(egl_lib.unwrap_err()).context("could not get display");
         }
 
         let (mut major, mut minor) = (0, 0);
-        if egl.Initialize(display, &mut major, &mut minor) == sys::FALSE {
-            return Err(egl.unwrap_err()).context("could not initialize");
+        if egl_lib.Initialize(display, &mut major, &mut minor) == sys::FALSE {
+            return Err(egl_lib.unwrap_err()).context("could not initialize");
         }
         log::info!("initialized egl version {major}.{minor}");
 
@@ -174,11 +173,11 @@ impl EglContext {
         ];
 
         let mut num_configs = 0;
-        if egl.GetConfigs(display, null_mut(), 0, &mut num_configs) == sys::FALSE {
-            return Err(egl.unwrap_err()).context("could not get number of available configs");
+        if egl_lib.GetConfigs(display, null_mut(), 0, &mut num_configs) == sys::FALSE {
+            return Err(egl_lib.unwrap_err()).context("could not get number of available configs");
         }
         let mut configs = vec![zeroed(); num_configs as usize];
-        if egl.ChooseConfig(
+        if egl_lib.ChooseConfig(
             display,
             config_attrs.as_ptr() as _,
             configs.as_mut_ptr(),
@@ -186,7 +185,7 @@ impl EglContext {
             &mut num_configs,
         ) == sys::FALSE
         {
-            return Err(egl.unwrap_err()).context("could not choose config");
+            return Err(egl_lib.unwrap_err()).context("could not choose config");
         }
         configs.set_len(num_configs as usize);
         if configs.is_empty() {
@@ -195,18 +194,18 @@ impl EglContext {
         let config = *configs.first().unwrap();
 
         let context_attrs = &[sys::CONTEXT_MAJOR_VERSION, 3, sys::NONE];
-        let context = egl.CreateContext(
+        let context = egl_lib.CreateContext(
             display,
             config,
             sys::NO_CONTEXT,
             context_attrs.as_ptr() as _,
         );
         if context == sys::NO_CONTEXT {
-            return Err(egl.unwrap_err()).context("could not create context");
+            return Err(egl_lib.unwrap_err()).context("could not create context");
         }
 
-        let egl_context = EglContext {
-            egl,
+        let egl_context = Context {
+            egl_lib,
             display,
             config,
             context,
@@ -216,28 +215,28 @@ impl EglContext {
     }
 }
 
-impl Drop for EglContext {
+impl Drop for Context {
     fn drop(&mut self) {
         unsafe {
-            self.egl.DestroyContext(self.display, self.context);
+            self.egl_lib.DestroyContext(self.display, self.context);
         }
     }
 }
 
-pub struct EglImageKhr {
-    egl: &'static Egl,
-    egl_context: &'static EglContext,
+pub struct ImageKhr {
+    egl_lib: &'static Lib,
+    egl_context: &'static Context,
     pub handle: sys::types::EGLImageKHR,
 }
 
-impl EglImageKhr {
+impl ImageKhr {
     pub unsafe fn new(
-        egl: &'static Egl,
-        egl_context: &'static EglContext,
-        gl_texture: &GlTexture2D,
+        egl_lib: &'static Lib,
+        egl_context: &'static Context,
+        gl_texture: &Texture2D,
     ) -> anyhow::Result<Self> {
         let image = unsafe {
-            egl.CreateImageKHR(
+            egl_lib.CreateImageKHR(
                 egl_context.display,
                 egl_context.context,
                 sys::GL_TEXTURE_2D,
@@ -246,54 +245,54 @@ impl EglImageKhr {
             )
         };
         if image == sys::NO_IMAGE_KHR {
-            return Err(egl.unwrap_err()).context("could not create egl khr image");
+            return Err(egl_lib.unwrap_err()).context("could not create egl khr image");
         }
         Ok(Self {
-            egl,
+            egl_lib,
             egl_context,
             handle: image,
         })
     }
 }
 
-impl Drop for EglImageKhr {
+impl Drop for ImageKhr {
     fn drop(&mut self) {
         unsafe {
-            self.egl
+            self.egl_lib
                 .DestroyImageKHR(self.egl_context.display, self.handle);
         }
     }
 }
 
-pub struct EglWindowSurface {
-    egl: &'static Egl,
-    egl_context: &'static EglContext,
+pub struct WindowSurface {
+    egl_lib: &'static Lib,
+    egl_context: &'static Context,
     pub handle: sys::types::EGLSurface,
 }
 
-impl EglWindowSurface {
+impl WindowSurface {
     pub unsafe fn new(
-        egl: &'static Egl,
-        egl_context: &'static EglContext,
+        egl_lib: &'static Lib,
+        egl_context: &'static Context,
         window_id: sys::EGLNativeWindowType,
     ) -> anyhow::Result<Self> {
         let window_surface =
-            egl.CreateWindowSurface(egl_context.display, egl_context.config, window_id, null());
+            egl_lib.CreateWindowSurface(egl_context.display, egl_context.config, window_id, null());
         if window_surface.is_null() {
-            return Err(egl.unwrap_err()).context("could not create window surface");
+            return Err(egl_lib.unwrap_err()).context("could not create window surface");
         }
         Ok(Self {
-            egl,
+            egl_lib,
             egl_context,
             handle: window_surface,
         })
     }
 }
 
-impl Drop for EglWindowSurface {
+impl Drop for WindowSurface {
     fn drop(&mut self) {
         unsafe {
-            self.egl
+            self.egl_lib
                 .DestroySurface(self.egl_context.display, self.handle);
         }
     }

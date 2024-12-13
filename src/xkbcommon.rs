@@ -1,27 +1,15 @@
 #![allow(non_camel_case_types)]
 
-use std::{
-    ffi::{c_char, c_int},
-    marker::{PhantomData, PhantomPinned},
-    os::fd::{AsRawFd, BorrowedFd},
-    ptr::null_mut,
-};
+use std::ffi::{c_char, c_int};
+use std::marker::{PhantomData, PhantomPinned};
+use std::os::fd::{AsRawFd, BorrowedFd};
+use std::ptr::null_mut;
 
 use anyhow::anyhow;
 
-use crate::dynlib::DynLib;
+use crate::dynlib::{opaque_struct, DynLib};
 
 pub const XKB_MOD_NAME_CTRL: &[u8] = b"Control\0";
-
-macro_rules! opaque_struct {
-    ($name:ident) => {
-        #[repr(C)]
-        pub struct $name {
-            _data: [u8; 0],
-            _marker: PhantomData<(*mut u8, PhantomPinned)>,
-        }
-    };
-}
 
 opaque_struct!(xkb_context);
 opaque_struct!(xkb_keymap);
@@ -65,7 +53,7 @@ pub enum xkb_state_component {
     XKB_STATE_LEDS = (1 << 8),
 }
 
-pub struct Xkbcommon {
+pub struct Lib {
     _lib: DynLib,
     pub xkb_context_new: unsafe extern "C" fn(flags: xkb_context_flags) -> *mut xkb_context,
     pub xkb_context_unref: unsafe extern "C" fn(context: *mut xkb_context),
@@ -96,7 +84,7 @@ pub struct Xkbcommon {
     ) -> c_int, // xkb_state_component
 }
 
-impl Xkbcommon {
+impl Lib {
     pub unsafe fn load() -> Result<Self, String> {
         let lib = DynLib::open(b"libxkbcommon.so\0")
             .or_else(|_| DynLib::open(b"libxkbcommon.so.0\0"))
@@ -127,8 +115,8 @@ pub struct Mods {
     ctrl: bool,
 }
 
-pub struct XkbContext {
-    xkbcommon: &'static Xkbcommon,
+pub struct Context {
+    xkbcommon: &'static Lib,
     pub context: *mut xkb_context,
     pub keymap: *mut xkb_keymap,
     pub state: *mut xkb_state,
@@ -136,13 +124,13 @@ pub struct XkbContext {
     pub mods: Mods,
 }
 
-impl XkbContext {
+impl Context {
     pub unsafe fn from_fd(
-        xkbcommon: &'static Xkbcommon,
+        xkbcommon_lib: &'static Lib,
         fd: BorrowedFd,
         size: u32,
     ) -> anyhow::Result<Self> {
-        let context = (xkbcommon.xkb_context_new)(xkb_context_flags::XKB_CONTEXT_NO_FLAGS);
+        let context = (xkbcommon_lib.xkb_context_new)(xkb_context_flags::XKB_CONTEXT_NO_FLAGS);
         if context.is_null() {
             return Err(anyhow!("xkb_context_new failed"));
         }
@@ -156,7 +144,7 @@ impl XkbContext {
             0,
         );
         // defer posix.munmap(keymap_string);
-        let keymap = (xkbcommon.xkb_keymap_new_from_string)(
+        let keymap = (xkbcommon_lib.xkb_keymap_new_from_string)(
             context,
             keymap_string as _,
             xkb_keymap_format::XKB_KEYMAP_FORMAT_TEXT_V1,
@@ -167,7 +155,7 @@ impl XkbContext {
             return Err(anyhow!("could not create keymap from string"));
         }
 
-        let state = (xkbcommon.xkb_state_new)(keymap);
+        let state = (xkbcommon_lib.xkb_state_new)(keymap);
         if state.is_null() {
             libc::munmap(keymap_string, size as _);
             return Err(anyhow!("could not create state"));
@@ -180,10 +168,13 @@ impl XkbContext {
             keymap,
             state,
             mod_indices: ModIndices {
-                ctrl: (xkbcommon.xkb_keymap_mod_get_index)(keymap, XKB_MOD_NAME_CTRL.as_ptr() as _),
+                ctrl: (xkbcommon_lib.xkb_keymap_mod_get_index)(
+                    keymap,
+                    XKB_MOD_NAME_CTRL.as_ptr() as _,
+                ),
             },
             mods: Mods { ctrl: false },
-            xkbcommon,
+            xkbcommon: xkbcommon_lib,
         })
     }
 

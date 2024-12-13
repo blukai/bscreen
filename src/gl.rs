@@ -2,7 +2,7 @@ use std::{ops::Deref, ptr::null};
 
 use anyhow::anyhow;
 
-use crate::{egl::Egl, gfx};
+use crate::{egl, gfx};
 
 pub mod sys {
     #[allow(non_camel_case_types)]
@@ -37,11 +37,11 @@ fn describe_texture_format(format: gfx::TextureFormat) -> TextureFormatDescripto
     }
 }
 
-pub struct Gl {
+pub struct Lib {
     gl: sys::Gles2,
 }
 
-impl Deref for Gl {
+impl Deref for Lib {
     type Target = sys::Gles2;
 
     fn deref(&self) -> &Self::Target {
@@ -49,44 +49,44 @@ impl Deref for Gl {
     }
 }
 
-impl Gl {
-    pub unsafe fn load(egl: &'static Egl) -> Self {
+impl Lib {
+    pub unsafe fn load(egl_lib: &'static egl::Lib) -> Self {
         let mut procname: [u8; 255] = [0u8; 255];
         let gl = sys::Gles2::load_with(|symbol| {
             assert!(symbol.len() < procname.len());
             std::ptr::copy_nonoverlapping(symbol.as_ptr(), procname.as_mut_ptr(), symbol.len());
             procname[symbol.len()] = b'\0';
-            egl.GetProcAddress(procname.as_ptr() as _) as _
+            egl_lib.GetProcAddress(procname.as_ptr() as _) as _
         });
 
         Self { gl }
     }
 }
 
-pub struct GlTexture2D {
-    gl: &'static Gl,
+pub struct Texture2D {
+    gl_lib: &'static Lib,
     pub handle: sys::types::GLuint,
 }
 
-impl GlTexture2D {
+impl Texture2D {
     pub unsafe fn new(
-        gl: &'static Gl,
+        gl_lib: &'static Lib,
         width: u32,
         height: u32,
         format: gfx::TextureFormat,
         pixels: Option<&[u8]>,
     ) -> Self {
         let mut texture = 0;
-        gl.GenTextures(1, &mut texture);
-        gl.BindTexture(sys::TEXTURE_2D, texture);
+        gl_lib.GenTextures(1, &mut texture);
+        gl_lib.BindTexture(sys::TEXTURE_2D, texture);
 
         // NOTE: to deal with min and mag filters, etc. - you might want to consider
         // introducing SamplerDescriptor and TextureViewDescriptor
-        gl.TexParameteri(sys::TEXTURE_2D, sys::TEXTURE_MIN_FILTER, sys::NEAREST as _);
-        gl.TexParameteri(sys::TEXTURE_2D, sys::TEXTURE_MAG_FILTER, sys::NEAREST as _);
+        gl_lib.TexParameteri(sys::TEXTURE_2D, sys::TEXTURE_MIN_FILTER, sys::NEAREST as _);
+        gl_lib.TexParameteri(sys::TEXTURE_2D, sys::TEXTURE_MAG_FILTER, sys::NEAREST as _);
 
         let format_desc = describe_texture_format(format);
-        gl.TexImage2D(
+        gl_lib.TexImage2D(
             sys::TEXTURE_2D,
             0,
             format_desc.internalformat,
@@ -99,121 +99,132 @@ impl GlTexture2D {
         );
 
         Self {
-            gl,
+            gl_lib,
             handle: texture,
         }
     }
 }
 
-impl Drop for GlTexture2D {
+impl Drop for Texture2D {
     fn drop(&mut self) {
         unsafe {
-            self.gl.DeleteTextures(1, &self.handle);
+            self.gl_lib.DeleteTextures(1, &self.handle);
         }
     }
 }
 
-pub struct GlShader {
-    gl: &'static Gl,
+pub struct Shader {
+    gl_lib: &'static Lib,
     pub handle: sys::types::GLuint,
 }
 
-impl GlShader {
-    pub unsafe fn new(gl: &'static Gl, src: &str, ty: sys::types::GLenum) -> anyhow::Result<Self> {
-        let shader = gl.CreateShader(ty);
-        gl.ShaderSource(shader, 1, &(src.as_ptr() as _), &(src.len() as _));
-        gl.CompileShader(shader);
+impl Shader {
+    pub unsafe fn new(
+        gl_lib: &'static Lib,
+        src: &str,
+        ty: sys::types::GLenum,
+    ) -> anyhow::Result<Self> {
+        let shader = gl_lib.CreateShader(ty);
+        gl_lib.ShaderSource(shader, 1, &(src.as_ptr() as _), &(src.len() as _));
+        gl_lib.CompileShader(shader);
 
         let mut shader_compiled = 0;
-        gl.GetShaderiv(shader, sys::COMPILE_STATUS, &mut shader_compiled);
+        gl_lib.GetShaderiv(shader, sys::COMPILE_STATUS, &mut shader_compiled);
         if shader_compiled == sys::FALSE as _ {
             let mut len = 0;
-            gl.GetShaderiv(shader, sys::INFO_LOG_LENGTH, &mut len);
+            gl_lib.GetShaderiv(shader, sys::INFO_LOG_LENGTH, &mut len);
 
             let mut msg = String::with_capacity(len as usize);
             msg.extend(std::iter::repeat('\0').take(len as usize));
-            gl.GetShaderInfoLog(shader, len, &mut len, msg.as_mut_ptr() as _);
-            msg.truncate(len as usize);
-
-            return Err(anyhow!("{msg}"));
-        }
-
-        Ok(Self { gl, handle: shader })
-    }
-}
-
-impl Drop for GlShader {
-    fn drop(&mut self) {
-        unsafe {
-            self.gl.DeleteShader(self.handle);
-        }
-    }
-}
-
-pub struct GlProgram {
-    gl: &'static Gl,
-    pub handle: sys::types::GLuint,
-}
-
-impl GlProgram {
-    pub unsafe fn new(gl: &'static Gl, vert_src: &str, frag_src: &str) -> anyhow::Result<Self> {
-        let vert_shader = GlShader::new(gl, vert_src, sys::VERTEX_SHADER)?;
-        let frag_shader = GlShader::new(gl, frag_src, sys::FRAGMENT_SHADER)?;
-
-        let program = gl.CreateProgram();
-
-        gl.AttachShader(program, vert_shader.handle);
-        gl.AttachShader(program, frag_shader.handle);
-        gl.LinkProgram(program);
-        gl.DetachShader(program, vert_shader.handle);
-        gl.DetachShader(program, frag_shader.handle);
-
-        let mut program_linked = 0;
-        gl.GetProgramiv(program, sys::LINK_STATUS, &mut program_linked);
-        if program_linked == sys::FALSE as _ {
-            let mut len = 0;
-            gl.GetProgramiv(program, sys::INFO_LOG_LENGTH, &mut len);
-
-            let mut msg = String::with_capacity(len as usize);
-            msg.extend(std::iter::repeat('\0').take(len as usize));
-            gl.GetProgramInfoLog(program, len, &mut len, msg.as_mut_ptr() as _);
+            gl_lib.GetShaderInfoLog(shader, len, &mut len, msg.as_mut_ptr() as _);
             msg.truncate(len as usize);
 
             return Err(anyhow!("{msg}"));
         }
 
         Ok(Self {
-            gl,
+            gl_lib,
+            handle: shader,
+        })
+    }
+}
+
+impl Drop for Shader {
+    fn drop(&mut self) {
+        unsafe {
+            self.gl_lib.DeleteShader(self.handle);
+        }
+    }
+}
+
+pub struct Program {
+    gl_lib: &'static Lib,
+    pub handle: sys::types::GLuint,
+}
+
+impl Program {
+    pub unsafe fn new(
+        gl_lib: &'static Lib,
+        vert_src: &str,
+        frag_src: &str,
+    ) -> anyhow::Result<Self> {
+        let vert_shader = Shader::new(gl_lib, vert_src, sys::VERTEX_SHADER)?;
+        let frag_shader = Shader::new(gl_lib, frag_src, sys::FRAGMENT_SHADER)?;
+
+        let program = gl_lib.CreateProgram();
+
+        gl_lib.AttachShader(program, vert_shader.handle);
+        gl_lib.AttachShader(program, frag_shader.handle);
+        gl_lib.LinkProgram(program);
+        gl_lib.DetachShader(program, vert_shader.handle);
+        gl_lib.DetachShader(program, frag_shader.handle);
+
+        let mut program_linked = 0;
+        gl_lib.GetProgramiv(program, sys::LINK_STATUS, &mut program_linked);
+        if program_linked == sys::FALSE as _ {
+            let mut len = 0;
+            gl_lib.GetProgramiv(program, sys::INFO_LOG_LENGTH, &mut len);
+
+            let mut msg = String::with_capacity(len as usize);
+            msg.extend(std::iter::repeat('\0').take(len as usize));
+            gl_lib.GetProgramInfoLog(program, len, &mut len, msg.as_mut_ptr() as _);
+            msg.truncate(len as usize);
+
+            return Err(anyhow!("{msg}"));
+        }
+
+        Ok(Self {
+            gl_lib,
             handle: program,
         })
     }
 }
 
-impl Drop for GlProgram {
+impl Drop for Program {
     fn drop(&mut self) {
         unsafe {
-            self.gl.DeleteProgram(self.handle);
+            self.gl_lib.DeleteProgram(self.handle);
         }
     }
 }
 
-pub struct GlBuffer {
-    gl: &'static Gl,
+pub struct Buffer {
+    gl_lib: &'static Lib,
     pub handle: sys::types::GLuint,
 }
 
-impl GlBuffer {
-    pub unsafe fn new(gl: &'static Gl) -> Self {
+impl Buffer {
+    pub unsafe fn new(gl_lib: &'static Lib) -> Self {
         let mut handle = 0;
-        gl.GenBuffers(1, &mut handle);
-        Self { gl, handle }
+        gl_lib.GenBuffers(1, &mut handle);
+        Self { gl_lib, handle }
     }
 }
 
-impl Drop for GlBuffer {
+impl Drop for Buffer {
     fn drop(&mut self) {
         unsafe {
-            self.gl.DeleteBuffers(1, &self.handle);
+            self.gl_lib.DeleteBuffers(1, &self.handle);
         }
     }
 }

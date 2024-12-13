@@ -1,54 +1,3 @@
-use std::{
-    collections::VecDeque,
-    ffi::c_int,
-    os::fd::{AsFd, BorrowedFd},
-};
-
-use anyhow::{anyhow, Context};
-use egl::{Egl, EglContext, EglImageKhr, EglWindowSurface};
-use gfx::{DrawBuffer, Rect, RectFill, Size};
-use gl::{Gl, GlTexture2D};
-use glam::Vec2;
-use input::{Event, KeyboardEvent, KeyboardEventKind, Scancode};
-use renderer::Renderer;
-use wayland_client::{
-    delegate_noop,
-    protocol::{
-        wl_buffer::WlBuffer,
-        wl_callback::{self, WlCallback},
-        wl_compositor::WlCompositor,
-        wl_keyboard::{self, KeyState, WlKeyboard},
-        wl_output::WlOutput,
-        wl_registry::{self, WlRegistry},
-        wl_seat::{self, WlSeat},
-        wl_surface::WlSurface,
-    },
-    Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
-};
-use wayland_egl::WlEglSurface as WlEglWindow;
-use wayland_protocols::wp::{
-    fractional_scale::v1::client::{
-        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
-        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
-    },
-    linux_dmabuf::zv1::client::{
-        zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
-        zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
-    },
-    viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
-};
-use wayland_protocols_wlr::{
-    layer_shell::v1::client::{
-        zwlr_layer_shell_v1::{self, ZwlrLayerShellV1},
-        zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
-    },
-    screencopy::v1::client::{
-        zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
-        zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
-    },
-};
-use xkbcommon::{XkbContext, Xkbcommon};
-
 mod dynlib;
 mod egl;
 mod gfx;
@@ -56,6 +5,44 @@ mod gl;
 mod input;
 mod renderer;
 mod xkbcommon;
+
+use std::collections::VecDeque;
+use std::ffi::c_int;
+use std::os::fd::{AsFd, BorrowedFd};
+
+use anyhow::{anyhow, Context};
+use gfx::{DrawBuffer, Rect, RectFill, Size};
+use glam::Vec2;
+use input::{Event, KeyboardEvent, KeyboardEventKind, Scancode};
+use renderer::Renderer;
+use wayland_client::protocol::wl_buffer::WlBuffer;
+use wayland_client::protocol::wl_callback::{self, WlCallback};
+use wayland_client::protocol::wl_compositor::WlCompositor;
+use wayland_client::protocol::wl_keyboard::{self, KeyState, WlKeyboard};
+use wayland_client::protocol::wl_output::WlOutput;
+use wayland_client::protocol::wl_registry::{self, WlRegistry};
+use wayland_client::protocol::wl_seat::{self, WlSeat};
+use wayland_client::protocol::wl_surface::WlSurface;
+use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
+use wayland_egl::WlEglSurface as WlEglWindow;
+use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
+use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::{
+    self, WpFractionalScaleV1,
+};
+use wayland_protocols::wp::linux_dmabuf::zv1::client::zwp_linux_buffer_params_v1::{
+    self, ZwpLinuxBufferParamsV1,
+};
+use wayland_protocols::wp::linux_dmabuf::zv1::client::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1;
+use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
+use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
+use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::{self, ZwlrLayerShellV1};
+use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{
+    self, ZwlrLayerSurfaceV1,
+};
+use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::{
+    self, ZwlrScreencopyFrameV1,
+};
+use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 
 const DRM_FORMAT_XRGB8888: u32 = 0x34325258;
 
@@ -73,8 +60,8 @@ struct ScreencopyDmabufDescriptor {
 }
 
 struct ScreencopyDmabuf {
-    gl_texture: GlTexture2D,
-    _egl_image_khr: EglImageKhr,
+    gl_texture: gl::Texture2D,
+    _egl_image_khr: egl::ImageKhr,
     wl_buffer: WlBuffer,
 }
 
@@ -87,8 +74,8 @@ impl ScreencopyDmabuf {
         qhandle: &QueueHandle<App>,
     ) -> anyhow::Result<Self> {
         let gl_texture = unsafe {
-            GlTexture2D::new(
-                app.gl,
+            gl::Texture2D::new(
+                app.gl_lib,
                 width,
                 height,
                 match format {
@@ -98,13 +85,14 @@ impl ScreencopyDmabuf {
                 None,
             )
         };
-        let egl_image_khr = unsafe { EglImageKhr::new(app.egl, app.egl_context, &gl_texture)? };
+        let egl_image_khr =
+            unsafe { egl::ImageKhr::new(app.egl_lib, app.egl_context, &gl_texture)? };
 
         let mut fourcc: c_int = 0;
         let mut num_planes: c_int = 0;
         let mut modifiers: egl::sys::types::EGLuint64KHR = 0;
         if unsafe {
-            app.egl.ExportDMABUFImageQueryMESA(
+            app.egl_lib.ExportDMABUFImageQueryMESA(
                 app.egl_context.display,
                 egl_image_khr.handle,
                 &mut fourcc,
@@ -113,7 +101,7 @@ impl ScreencopyDmabuf {
             )
         } == egl::sys::FALSE
         {
-            return Err(app.egl.unwrap_err()).context("could not retrieve pixel format");
+            return Err(app.egl_lib.unwrap_err()).context("could not retrieve pixel format");
         }
         // TODO: can there me other number of planes?
         assert!(num_planes == 1);
@@ -122,7 +110,7 @@ impl ScreencopyDmabuf {
         let mut stride: egl::sys::types::EGLint = 0;
         let mut offset: egl::sys::types::EGLint = 0;
         if unsafe {
-            app.egl.ExportDMABUFImageMESA(
+            app.egl_lib.ExportDMABUFImageMESA(
                 app.egl_context.display,
                 egl_image_khr.handle,
                 &mut fd,
@@ -131,7 +119,7 @@ impl ScreencopyDmabuf {
             )
         } == egl::sys::FALSE
         {
-            return Err(app.egl.unwrap_err()).context("could not retrieve dmabuf fd");
+            return Err(app.egl_lib.unwrap_err()).context("could not retrieve dmabuf fd");
         }
 
         let params = app
@@ -181,14 +169,14 @@ struct Screen {
     layer_surface_configured: bool,
     logical_size: Option<Size>,
     egl_window: Option<WlEglWindow>,
-    egl_window_surface: Option<EglWindowSurface>,
+    egl_window_surface: Option<egl::WindowSurface>,
 }
 
 impl Screen {
     fn draw(
         &self,
-        egl_context: &'static EglContext,
-        gl: &'static Gl,
+        egl_context: &'static egl::Context,
+        gl_lib: &'static gl::Lib,
         draw_buffer: &mut DrawBuffer,
         renderer: &Renderer,
     ) -> anyhow::Result<()> {
@@ -201,8 +189,8 @@ impl Screen {
         unsafe {
             egl_context.make_current(egl_window_surface.handle)?;
 
-            gl.ClearColor(0.0, 0.0, 0.0, 0.0);
-            gl.Clear(gl::sys::COLOR_BUFFER_BIT);
+            gl_lib.ClearColor(0.0, 0.0, 0.0, 0.0);
+            gl_lib.Clear(gl::sys::COLOR_BUFFER_BIT);
         }
 
         draw_buffer.clear();
@@ -223,10 +211,10 @@ impl Screen {
 }
 
 struct App {
-    egl: &'static Egl,
-    egl_context: &'static EglContext,
-    gl: &'static Gl,
-    xkbcommon: &'static Xkbcommon,
+    egl_lib: &'static egl::Lib,
+    egl_context: &'static egl::Context,
+    gl_lib: &'static gl::Lib,
+    xkbcommon_lib: &'static xkbcommon::Lib,
 
     compositor: Option<WlCompositor>,
     fractional_scale_manager: Option<WpFractionalScaleManagerV1>,
@@ -237,7 +225,7 @@ struct App {
     viewporter: Option<WpViewporter>,
 
     screens: Vec<Screen>,
-    xkb_context: Option<XkbContext>,
+    xkb_context: Option<xkbcommon::Context>,
 
     events: VecDeque<Event>,
     draw_buffer: DrawBuffer,
@@ -357,9 +345,10 @@ impl Dispatch<WlRegistry, ()> for App {
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
+        use wl_registry::Event::*;
+
         log::trace!("wl_registry::Event::{event:?}");
 
-        use wl_registry::Event::*;
         match event {
             Global {
                 interface,
@@ -434,6 +423,8 @@ impl Dispatch<ZwlrScreencopyFrameV1, usize> for App {
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
+        use zwlr_screencopy_frame_v1::Event::*;
+
         log::trace!("zwlr_screencopy_frame_v1::Event::{event:?}");
 
         let idx = *data;
@@ -441,7 +432,6 @@ impl Dispatch<ZwlrScreencopyFrameV1, usize> for App {
             unreachable!();
         };
 
-        use zwlr_screencopy_frame_v1::Event::*;
         match event {
             LinuxDmabuf {
                 format,
@@ -490,12 +480,13 @@ impl Dispatch<WpFractionalScaleV1, usize> for App {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
+        use wp_fractional_scale_v1::Event::*;
+
         log::trace!("wp_fractional_scale_v1::Event::{event:?}");
 
         let idx = *data;
         let screen = &mut state.screens[idx];
 
-        use wp_fractional_scale_v1::Event::*;
         match event {
             PreferredScale { scale } => {
                 // > The sent scale is the numerator of a fraction with a denominator of 120.
@@ -517,12 +508,13 @@ impl Dispatch<ZwlrLayerSurfaceV1, usize> for App {
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
+        use zwlr_layer_surface_v1::Event::*;
+
         log::trace!("zwlr_layer_surface_v1::Event::{event:?}");
 
         let idx = *data;
         let screen = &mut state.screens[idx];
 
-        use zwlr_layer_surface_v1::Event::*;
         match event {
             Configure {
                 serial,
@@ -545,7 +537,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, usize> for App {
                 )
                 .expect("failed to create wl egl window");
                 let egl_window_surface = unsafe {
-                    EglWindowSurface::new(state.egl, state.egl_context, egl_window.ptr())
+                    egl::WindowSurface::new(state.egl_lib, state.egl_context, egl_window.ptr())
                         .expect("failed to create egl window surface")
                 };
 
@@ -563,7 +555,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, usize> for App {
                 screen
                     .draw(
                         state.egl_context,
-                        state.gl,
+                        state.gl_lib,
                         &mut state.draw_buffer,
                         &state.renderer,
                     )
@@ -586,12 +578,13 @@ impl Dispatch<WlCallback, usize> for App {
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
+        use wl_callback::Event::*;
+
         log::trace!("wl_callback::Event::{event:?}");
 
         let idx = *data;
         let screen = &mut state.screens[idx];
 
-        use wl_callback::Event::*;
         match event {
             Done { .. } => {
                 let Some(surface) = screen.surface.as_ref() else {
@@ -601,7 +594,7 @@ impl Dispatch<WlCallback, usize> for App {
                 screen
                     .draw(
                         state.egl_context,
-                        state.gl,
+                        state.gl_lib,
                         &mut state.draw_buffer,
                         &state.renderer,
                     )
@@ -646,9 +639,10 @@ impl Dispatch<WlKeyboard, ()> for App {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
+        use wl_keyboard::Event::*;
+
         log::trace!("wl_keyboard::Event::{event:?}");
 
-        use wl_keyboard::Event::*;
         match event {
             Keymap { format, fd, size } => match format {
                 WEnum::Value(value) => match value {
@@ -658,7 +652,7 @@ impl Dispatch<WlKeyboard, ()> for App {
                     wl_keyboard::KeymapFormat::XkbV1 => {
                         assert!(state.xkb_context.is_none());
                         let xkb_context = unsafe {
-                            XkbContext::from_fd(state.xkbcommon, fd.as_fd(), size)
+                            xkbcommon::Context::from_fd(state.xkbcommon_lib, fd.as_fd(), size)
                                 .expect("failed to create xkb context")
                         };
                         state.xkb_context.replace(xkb_context);
@@ -737,20 +731,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _registry = display.get_registry(&qhandle, ());
 
     // this is not super rust'y, but i don't care. egl lib is not going to run away from here.
-    let egl_ = unsafe { Egl::load()? };
-    let egl: &'static Egl = unsafe { std::mem::transmute(&egl_) };
-    let egl_context_ = unsafe { EglContext::create(egl, connection.backend().display_ptr() as _)? };
-    let egl_context: &'static EglContext = unsafe { std::mem::transmute(&egl_context_) };
-    let gl_ = unsafe { Gl::load(egl) };
-    let gl: &'static Gl = unsafe { std::mem::transmute(&gl_) };
-    let xkbcommon_ = unsafe { Xkbcommon::load()? };
-    let xkbcommon: &'static Xkbcommon = unsafe { std::mem::transmute(&xkbcommon_) };
+    let egl_lib_ = unsafe { egl::Lib::load()? };
+    let egl_lib: &'static egl::Lib = unsafe { std::mem::transmute(&egl_lib_) };
+    let egl_context_ =
+        unsafe { egl::Context::create(egl_lib, connection.backend().display_ptr() as _)? };
+    let egl_context: &'static egl::Context = unsafe { std::mem::transmute(&egl_context_) };
+    let gl_lib_ = unsafe { gl::Lib::load(egl_lib) };
+    let gl_lib: &'static gl::Lib = unsafe { std::mem::transmute(&gl_lib_) };
+    let xkbcommon_lib_ = unsafe { xkbcommon::Lib::load()? };
+    let xkbcommon_lib: &'static xkbcommon::Lib = unsafe { std::mem::transmute(&xkbcommon_lib_) };
 
     let mut app = App {
-        egl,
+        egl_lib,
         egl_context,
-        gl,
-        xkbcommon,
+        gl_lib,
+        xkbcommon_lib,
 
         compositor: None,
         fractional_scale_manager: None,
@@ -765,7 +760,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         events: VecDeque::new(),
         draw_buffer: DrawBuffer::default(),
-        renderer: unsafe { Renderer::new(gl)? },
+        renderer: unsafe { Renderer::new(gl_lib)? },
 
         quit: false,
     };
@@ -781,9 +776,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Some(event) = app.events.pop_front() {
             match event {
                 Event::Keyboard(keyboard_event) => match keyboard_event.kind {
-                    KeyboardEventKind::Press { scancode } if scancode == Scancode::Esc => {
-                        app.quit = true;
-                    }
+                    KeyboardEventKind::Press {
+                        scancode: Scancode::Esc,
+                    } => app.quit = true,
                     _ => {}
                 },
             }
