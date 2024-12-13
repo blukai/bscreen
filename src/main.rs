@@ -6,21 +6,36 @@ use std::{
 
 use anyhow::{anyhow, Context};
 use egl::{Egl, EglContext, EglImageKhr, EglWindowSurface};
+use gfx::{DrawBuffer, Rect, RectFill, Size};
 use gl::{Gl, GlTexture2D};
+use glam::Vec2;
 use input::{Event, KeyboardEvent, KeyboardEventKind, Scancode};
+use renderer::Renderer;
 use wayland_client::{
     delegate_noop,
     protocol::{
-        wl_buffer, wl_callback, wl_compositor,
-        wl_keyboard::{self, KeyState},
-        wl_output, wl_registry, wl_seat, wl_surface,
+        wl_buffer::WlBuffer,
+        wl_callback::{self, WlCallback},
+        wl_compositor::WlCompositor,
+        wl_keyboard::{self, KeyState, WlKeyboard},
+        wl_output::WlOutput,
+        wl_registry::{self, WlRegistry},
+        wl_seat::{self, WlSeat},
+        wl_surface::WlSurface,
     },
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
 };
 use wayland_egl::WlEglSurface as WlEglWindow;
-use wayland_protocols::wp::linux_dmabuf::zv1::client::{
-    zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
-    zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+use wayland_protocols::wp::{
+    fractional_scale::v1::client::{
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+    },
+    linux_dmabuf::zv1::client::{
+        zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
+        zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+    },
+    viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 use wayland_protocols_wlr::{
     layer_shell::v1::client::{
@@ -39,6 +54,7 @@ mod egl;
 mod gfx;
 mod gl;
 mod input;
+mod renderer;
 mod xkbcommon;
 
 const DRM_FORMAT_XRGB8888: u32 = 0x34325258;
@@ -57,9 +73,9 @@ struct ScreencopyDmabufDescriptor {
 }
 
 struct ScreencopyDmabuf {
-    _gl_texture: GlTexture2D,
+    gl_texture: GlTexture2D,
     _egl_image_khr: EglImageKhr,
-    wl_buffer: wl_buffer::WlBuffer,
+    wl_buffer: WlBuffer,
 }
 
 impl ScreencopyDmabuf {
@@ -142,7 +158,7 @@ impl ScreencopyDmabuf {
         );
 
         Ok(Self {
-            _gl_texture: gl_texture,
+            gl_texture,
             _egl_image_khr: egl_image_khr,
             wl_buffer,
         })
@@ -156,25 +172,49 @@ struct Screencopy {
 }
 
 struct Screen {
-    output: wl_output::WlOutput,
+    output: WlOutput,
     screencopy: Option<Screencopy>,
-    surface: Option<wl_surface::WlSurface>,
+    surface: Option<WlSurface>,
+    fractional_scale: Option<f64>,
+    viewport: Option<WpViewport>,
     layer_surface: Option<ZwlrLayerSurfaceV1>,
     layer_surface_configured: bool,
+    logical_size: Option<Size>,
     egl_window: Option<WlEglWindow>,
     egl_window_surface: Option<EglWindowSurface>,
 }
 
 impl Screen {
-    fn draw(&self, egl_context: &'static EglContext, gl: &'static Gl) -> anyhow::Result<()> {
-        let Some(egl_window_surface) = self.egl_window_surface.as_ref() else {
-            unreachable!()
-        };
+    fn draw(
+        &self,
+        egl_context: &'static EglContext,
+        gl: &'static Gl,
+        draw_buffer: &mut DrawBuffer,
+        renderer: &Renderer,
+    ) -> anyhow::Result<()> {
+        let egl_window_surface = self.egl_window_surface.as_ref().unwrap();
+        let screencopy = self.screencopy.as_ref().unwrap();
+        let screencopy_dmabuf = screencopy.dmabuf.as_ref().unwrap();
+        let logical_size = self.logical_size.unwrap();
+        let fractional_scale = self.fractional_scale.unwrap_or(1.0);
 
         unsafe {
             egl_context.make_current(egl_window_surface.handle)?;
-            gl.ClearColor(1.0, 0.0, 0.0, 0.5);
+
+            gl.ClearColor(0.0, 0.0, 0.0, 0.0);
             gl.Clear(gl::sys::COLOR_BUFFER_BIT);
+        }
+
+        draw_buffer.clear();
+
+        draw_buffer.push_rect_filled(
+            Rect::new(Vec2::splat(0.0), logical_size.as_uvec2().as_vec2()),
+            RectFill::TextureHandle(screencopy_dmabuf.gl_texture.handle),
+        );
+
+        unsafe {
+            renderer.draw(logical_size, fractional_scale, draw_buffer);
+
             egl_context.swap_buffers(egl_window_surface.handle)?;
         }
 
@@ -188,16 +228,22 @@ struct App {
     gl: &'static Gl,
     xkbcommon: &'static Xkbcommon,
 
-    compositor: Option<wl_compositor::WlCompositor>,
+    compositor: Option<WlCompositor>,
+    fractional_scale_manager: Option<WpFractionalScaleManagerV1>,
     layer_shell: Option<ZwlrLayerShellV1>,
     linux_dmabuf: Option<ZwpLinuxDmabufV1>,
     screencopy_manager: Option<ZwlrScreencopyManagerV1>,
-    seat: Option<wl_seat::WlSeat>,
+    seat: Option<WlSeat>,
+    viewporter: Option<WpViewporter>,
 
-    quit: bool,
     screens: Vec<Screen>,
     xkb_context: Option<XkbContext>,
+
     events: VecDeque<Event>,
+    draw_buffer: DrawBuffer,
+    renderer: Renderer,
+
+    quit: bool,
 }
 
 impl App {
@@ -250,13 +296,17 @@ impl App {
         let Some(layer_shell) = self.layer_shell.as_ref() else {
             return Err(anyhow!("layer shell is unavail"));
         };
+        let Some(fractional_scale_manager) = self.fractional_scale_manager.as_ref() else {
+            return Err(anyhow!("fractional scale manager is unavail"));
+        };
+        let Some(viewporter) = self.viewporter.as_ref() else {
+            return Err(anyhow!("viewporter is unavail;"));
+        };
 
         for (idx, screen) in self.screens.iter_mut().enumerate() {
-            assert!(screen.surface.is_none());
-            assert!(screen.layer_surface.is_none());
-            assert!(!screen.layer_surface_configured);
-
             let surface = compositor.create_surface(qhandle, ());
+            fractional_scale_manager.get_fractional_scale(&surface, qhandle, idx);
+            let viewport = viewporter.get_viewport(&surface, qhandle, ());
             let layer_surface = layer_shell.get_layer_surface(
                 &surface,
                 Some(&screen.output),
@@ -281,6 +331,7 @@ impl App {
             surface.commit();
 
             screen.surface.replace(surface);
+            screen.viewport.replace(viewport);
             screen.layer_surface.replace(layer_surface);
         }
 
@@ -297,42 +348,24 @@ impl App {
     }
 }
 
-impl Dispatch<wl_registry::WlRegistry, ()> for App {
+impl Dispatch<WlRegistry, ()> for App {
     fn event(
         state: &mut Self,
-        registry: &wl_registry::WlRegistry,
-        event: <wl_registry::WlRegistry as Proxy>::Event,
+        registry: &WlRegistry,
+        event: <WlRegistry as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
+        log::trace!("wl_registry::Event::{event:?}");
+
+        use wl_registry::Event::*;
         match event {
-            wl_registry::Event::Global {
+            Global {
                 interface,
                 name,
                 version,
             } => match interface.as_str() {
-                "wl_output" => {
-                    state.screens.push(Screen {
-                        output: registry.bind(name, version, qhandle, ()),
-                        screencopy: None,
-                        surface: None,
-                        layer_surface: None,
-                        layer_surface_configured: false,
-                        egl_window: None,
-                        egl_window_surface: None,
-                    });
-                }
-                "zwlr_screencopy_manager_v1" => {
-                    state
-                        .screencopy_manager
-                        .replace(registry.bind(name, version, qhandle, ()));
-                }
-                "zwp_linux_dmabuf_v1" => {
-                    state
-                        .linux_dmabuf
-                        .replace(registry.bind(name, version, qhandle, ()));
-                }
                 "wl_compositor" => {
                     state
                         .compositor
@@ -343,14 +376,49 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
                         .layer_shell
                         .replace(registry.bind(name, version, qhandle, ()));
                 }
+                "zwp_linux_dmabuf_v1" => {
+                    state
+                        .linux_dmabuf
+                        .replace(registry.bind(name, version, qhandle, ()));
+                }
+                "zwlr_screencopy_manager_v1" => {
+                    state
+                        .screencopy_manager
+                        .replace(registry.bind(name, version, qhandle, ()));
+                }
+                "wl_output" => {
+                    state.screens.push(Screen {
+                        output: registry.bind(name, version, qhandle, ()),
+                        screencopy: None,
+                        surface: None,
+                        fractional_scale: None,
+                        viewport: None,
+                        layer_surface: None,
+                        layer_surface_configured: false,
+                        logical_size: None,
+                        egl_window: None,
+                        egl_window_surface: None,
+                    });
+                }
                 "wl_seat" => {
                     state
                         .seat
                         .replace(registry.bind(name, version, qhandle, ()));
                 }
-                _ => {
-                    log::debug!("unused interface {interface}");
+                "wp_viewporter" => {
+                    state
+                        .viewporter
+                        .replace(registry.bind(name, version, qhandle, ()));
                 }
+                "wp_fractional_scale_manager_v1" => {
+                    state.fractional_scale_manager.replace(registry.bind(
+                        name,
+                        version,
+                        qhandle,
+                        (),
+                    ));
+                }
+                _ => {}
             },
             _ => unimplemented!("unhandled wl_registry event {event:?}"),
         }
@@ -366,7 +434,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, usize> for App {
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        log::debug!("zwlr_screencopy_frame_v1::Event::{event:?}");
+        log::trace!("zwlr_screencopy_frame_v1::Event::{event:?}");
 
         let idx = *data;
         let Some(mut screencopy) = state.screens[idx].screencopy.take() else {
@@ -413,6 +481,33 @@ impl Dispatch<ZwlrScreencopyFrameV1, usize> for App {
     }
 }
 
+impl Dispatch<WpFractionalScaleV1, usize> for App {
+    fn event(
+        state: &mut Self,
+        _proxy: &WpFractionalScaleV1,
+        event: <WpFractionalScaleV1 as Proxy>::Event,
+        data: &usize,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        log::trace!("wp_fractional_scale_v1::Event::{event:?}");
+
+        let idx = *data;
+        let screen = &mut state.screens[idx];
+
+        use wp_fractional_scale_v1::Event::*;
+        match event {
+            PreferredScale { scale } => {
+                // > The sent scale is the numerator of a fraction with a denominator of 120.
+                let fractional_scale = scale as f64 / 120.0;
+                log::debug!("recv fractional scale {fractional_scale} for output {idx}");
+                screen.fractional_scale.replace(fractional_scale);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 impl Dispatch<ZwlrLayerSurfaceV1, usize> for App {
     fn event(
         state: &mut Self,
@@ -422,7 +517,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, usize> for App {
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        log::debug!("zwlr_layer_surface_v1::Event::{event:?}");
+        log::trace!("zwlr_layer_surface_v1::Event::{event:?}");
 
         let idx = *data;
         let screen = &mut state.screens[idx];
@@ -434,25 +529,44 @@ impl Dispatch<ZwlrLayerSurfaceV1, usize> for App {
                 width,
                 height,
             } => {
+                log::debug!("recv layer surface configre {width}x{height} for output {idx}");
                 proxy.ack_configure(serial);
 
-                let Some(surface) = screen.surface.as_ref() else {
-                    unreachable!()
-                };
+                let logical_size = Size::new(width, height);
+                let physical_size =
+                    logical_size.to_physical(screen.fractional_scale.unwrap_or(1.0));
 
-                let egl_window = WlEglWindow::new(surface.id(), width as _, height as _)
-                    .expect("failed to create wl egl window");
+                let surface = screen.surface.as_ref().unwrap();
+
+                let egl_window = WlEglWindow::new(
+                    surface.id(),
+                    physical_size.width as i32,
+                    physical_size.height as i32,
+                )
+                .expect("failed to create wl egl window");
                 let egl_window_surface = unsafe {
                     EglWindowSurface::new(state.egl, state.egl_context, egl_window.ptr())
                         .expect("failed to create egl window surface")
                 };
 
+                let Some(viewport) = screen.viewport.as_ref() else {
+                    unreachable!()
+                };
+                viewport.set_destination(logical_size.width as i32, logical_size.height as i32);
+                surface.commit();
+
                 screen.layer_surface_configured = true;
+                screen.logical_size.replace(logical_size);
                 screen.egl_window.replace(egl_window);
                 screen.egl_window_surface.replace(egl_window_surface);
 
                 screen
-                    .draw(state.egl_context, state.gl)
+                    .draw(
+                        state.egl_context,
+                        state.gl,
+                        &mut state.draw_buffer,
+                        &state.renderer,
+                    )
                     .expect("failed to draw");
 
                 surface.frame(qhandle, idx);
@@ -463,15 +577,17 @@ impl Dispatch<ZwlrLayerSurfaceV1, usize> for App {
     }
 }
 
-impl Dispatch<wl_callback::WlCallback, usize> for App {
+impl Dispatch<WlCallback, usize> for App {
     fn event(
         state: &mut Self,
-        _proxy: &wl_callback::WlCallback,
-        event: <wl_callback::WlCallback as Proxy>::Event,
+        _proxy: &WlCallback,
+        event: <WlCallback as Proxy>::Event,
         data: &usize,
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
+        log::trace!("wl_callback::Event::{event:?}");
+
         let idx = *data;
         let screen = &mut state.screens[idx];
 
@@ -483,7 +599,12 @@ impl Dispatch<wl_callback::WlCallback, usize> for App {
                 };
 
                 screen
-                    .draw(state.egl_context, state.gl)
+                    .draw(
+                        state.egl_context,
+                        state.gl,
+                        &mut state.draw_buffer,
+                        &state.renderer,
+                    )
                     .expect("failed to draw");
 
                 surface.frame(qhandle, idx);
@@ -493,16 +614,16 @@ impl Dispatch<wl_callback::WlCallback, usize> for App {
     }
 }
 
-impl Dispatch<wl_seat::WlSeat, ()> for App {
+impl Dispatch<WlSeat, ()> for App {
     fn event(
         state: &mut Self,
-        proxy: &wl_seat::WlSeat,
-        event: <wl_seat::WlSeat as Proxy>::Event,
+        proxy: &WlSeat,
+        event: <WlSeat as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        log::debug!("wl_seat::Event::{event:?}");
+        log::trace!("wl_seat::Event::{event:?}");
 
         let wl_seat::Event::Capabilities { capabilities } = event else {
             return;
@@ -516,16 +637,16 @@ impl Dispatch<wl_seat::WlSeat, ()> for App {
     }
 }
 
-impl Dispatch<wl_keyboard::WlKeyboard, ()> for App {
+impl Dispatch<WlKeyboard, ()> for App {
     fn event(
         state: &mut Self,
-        _proxy: &wl_keyboard::WlKeyboard,
-        event: <wl_keyboard::WlKeyboard as Proxy>::Event,
+        _proxy: &WlKeyboard,
+        event: <WlKeyboard as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        log::debug!("wl_keyboard::Event::{event:?}");
+        log::trace!("wl_keyboard::Event::{event:?}");
 
         use wl_keyboard::Event::*;
         match event {
@@ -593,14 +714,17 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for App {
     }
 }
 
+delegate_noop!(App: ignore WpFractionalScaleManagerV1);
+delegate_noop!(App: ignore WpViewport);
+delegate_noop!(App: ignore WpViewporter);
 delegate_noop!(App: ignore ZwlrLayerShellV1);
 delegate_noop!(App: ignore ZwlrScreencopyManagerV1);
 delegate_noop!(App: ignore ZwpLinuxBufferParamsV1);
 delegate_noop!(App: ignore ZwpLinuxDmabufV1);
-delegate_noop!(App: ignore wl_buffer::WlBuffer);
-delegate_noop!(App: ignore wl_output::WlOutput);
-delegate_noop!(App: ignore wl_surface::WlSurface);
-delegate_noop!(App: ignore wl_compositor::WlCompositor);
+delegate_noop!(App: ignore WlBuffer);
+delegate_noop!(App: ignore WlCompositor);
+delegate_noop!(App: ignore WlOutput);
+delegate_noop!(App: ignore WlSurface);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -629,15 +753,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         xkbcommon,
 
         compositor: None,
+        fractional_scale_manager: None,
         layer_shell: None,
         linux_dmabuf: None,
         screencopy_manager: None,
         seat: None,
+        viewporter: None,
 
-        quit: false,
         screens: vec![],
         xkb_context: None,
+
         events: VecDeque::new(),
+        draw_buffer: DrawBuffer::default(),
+        renderer: unsafe { Renderer::new(gl)? },
+
+        quit: false,
     };
 
     event_queue.roundtrip(&mut app)?;
