@@ -2,7 +2,7 @@ use glam::Vec2;
 
 use crate::{
     gfx::{DrawBuffer, Rect, RectFill},
-    input::{Event, PointerEventKind},
+    input::{CursorShape, Event, PointerEventKind},
 };
 
 mod theme {
@@ -21,6 +21,18 @@ enum HandleType {
     BottomRight,
     BottomLeft,
     Inside,
+}
+
+impl HandleType {
+    fn cursor_shape(&self) -> CursorShape {
+        match self {
+            Self::TopLeft => CursorShape::NwResize,
+            Self::TopRight => CursorShape::NeResize,
+            Self::BottomRight => CursorShape::SeResize,
+            Self::BottomLeft => CursorShape::SwResize,
+            Self::Inside => CursorShape::Move,
+        }
+    }
 }
 
 fn top_left_rect_handle(rect: &Rect) -> Rect {
@@ -64,6 +76,7 @@ pub struct Crop {
     view_rect: Option<Rect>,
     crop_rect: Option<Rect>,
     handle: Option<HandleType>,
+    pub cursor: Option<CursorShape>,
 }
 
 impl Crop {
@@ -118,6 +131,14 @@ impl Crop {
                         }
                     }
                 }
+            }
+        }
+
+        self.cursor = Some(CursorShape::Crosshair);
+        if let Some(crop_rect) = self.crop_rect.as_ref() {
+            if let Some(handle) = pointer_on_handle(&crop_rect.normalize(), &pointer_event.position)
+            {
+                self.cursor = Some(handle.cursor_shape());
             }
         }
 

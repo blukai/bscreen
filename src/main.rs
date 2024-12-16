@@ -7,7 +7,7 @@ mod input;
 mod renderer;
 mod xkbcommon;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_int;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::os::fd::{AsFd, BorrowedFd};
@@ -17,8 +17,8 @@ use crop::Crop;
 use gfx::{DrawBuffer, Rect, RectFill, Size};
 use glam::Vec2;
 use input::{
-    Event, KeyboardEvent, KeyboardEventKind, PointerButton, PointerButtons, PointerEvent,
-    PointerEventKind, Scancode,
+    CursorShape, Event, KeyboardEvent, KeyboardEventKind, PointerButton, PointerButtons,
+    PointerEvent, PointerEventKind, Scancode,
 };
 use renderer::Renderer;
 use wayland_client::protocol::wl_buffer::WlBuffer;
@@ -29,8 +29,10 @@ use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_pointer::{self, WlPointer};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_seat::{self, WlSeat};
+use wayland_client::protocol::wl_shm::WlShm;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
+use wayland_cursor::CursorTheme;
 use wayland_egl::WlEglSurface as WlEglWindow;
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::{
@@ -220,6 +222,31 @@ impl Screen {
     }
 }
 
+#[derive(PartialEq, Eq, Hash)]
+enum SerialType {
+    KeyboardEnter,
+    PointerEnter,
+}
+
+#[derive(Default)]
+struct SerialTracker {
+    serial_map: HashMap<SerialType, u32>,
+}
+
+impl SerialTracker {
+    fn update_serial(&mut self, ty: SerialType, serial: u32) {
+        self.serial_map.insert(ty, serial);
+    }
+
+    fn reset_serial(&mut self, ty: SerialType) {
+        self.serial_map.remove(&ty);
+    }
+
+    fn get_serial(&self, ty: SerialType) -> Option<u32> {
+        self.serial_map.get(&ty).cloned()
+    }
+}
+
 fn get_surface_id(surface: &WlSurface) -> u64 {
     let mut s = DefaultHasher::new();
     surface.hash(&mut s);
@@ -231,11 +258,71 @@ struct Keyboard {
     xkb_context: Option<xkbcommon::Context>,
 }
 
-#[derive(Default)]
 struct Pointer {
+    pointer: WlPointer,
+
     position: Vec2,
     buttons: PointerButtons,
     frame_events: VecDeque<PointerEvent>,
+
+    cursor_theme: CursorTheme,
+    cursor_surface: WlSurface,
+}
+
+impl Pointer {
+    fn new(
+        pointer: WlPointer,
+        conn: &Connection,
+        qhandle: &QueueHandle<App>,
+        shm: WlShm,
+        compositor: WlCompositor,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            pointer,
+
+            position: Default::default(),
+            buttons: Default::default(),
+            frame_events: Default::default(),
+
+            // NOTE: it seems like people on the internet default to 24.
+            //
+            // TODO: do i need to take scale (/fractional scaling) into account?
+            cursor_theme: CursorTheme::load(conn, shm, 24)?,
+            cursor_surface: compositor.create_surface(qhandle, ()),
+        })
+    }
+
+    fn set_cursor(&mut self, shape: CursorShape, serial_tracker: &SerialTracker) {
+        let Some(serial) = serial_tracker.get_serial(SerialType::PointerEnter) else {
+            log::warn!("no pointer enter serial found");
+            return;
+        };
+
+        let Some(cursor) = self.cursor_theme.get_cursor(shape.name()) else {
+            log::warn!("could not find {} cursor", shape.name());
+            return;
+        };
+
+        // i fucking hate this
+        let cursor_img_buf = &cursor[0];
+        // TODO: might need to take into account wl.Output.Event.scale event to set
+        // buffer scale.
+        self.cursor_surface.attach(Some(cursor_img_buf), 0, 0);
+        // NOTE: pre version 4 wl_surface::damage must be used instead.
+        assert!(self.cursor_surface.version() >= 4);
+        let (width, height) = cursor_img_buf.dimensions();
+        self.cursor_surface
+            .damage_buffer(0, 0, width as i32, height as i32);
+        self.cursor_surface.commit();
+
+        let (hotspot_x, hotspot_y) = cursor_img_buf.hotspot();
+        self.pointer.set_cursor(
+            serial,
+            Some(&self.cursor_surface),
+            hotspot_x as i32,
+            hotspot_y as i32,
+        );
+    }
 }
 
 struct App {
@@ -251,14 +338,14 @@ struct App {
     screencopy_manager: Option<ZwlrScreencopyManagerV1>,
     seat: Option<WlSeat>,
     viewporter: Option<WpViewporter>,
+    shm: Option<WlShm>,
 
     screens: Vec<Screen>,
 
-    keyboard: Keyboard,
-    pointer: Pointer,
-
-    // TODO: introduce screens state or something that will contain screens and focused surface
-    // infos
+    // TODO: introduce input state or something
+    keyboard: Option<Keyboard>,
+    pointer: Option<Pointer>,
+    serial_tracker: SerialTracker,
     keyboard_focused_surface_id: Option<u64>,
     pointer_focused_surface_id: Option<u64>,
 
@@ -395,6 +482,11 @@ impl App {
             screen.logical_size.unwrap().as_uvec2().as_vec2(),
         );
         let crop_mutated = screen.crop.update(view_rect, event);
+        if let Some(shape) = screen.crop.cursor.as_ref() {
+            if let Some(pointer) = self.pointer.as_mut() {
+                pointer.set_cursor(*shape, &self.serial_tracker);
+            }
+        }
 
         // maybe clear crops on other screens
         if crop_mutated {
@@ -480,6 +572,9 @@ impl Dispatch<WlRegistry, ()> for App {
                         qhandle,
                         (),
                     ));
+                }
+                "wl_shm" => {
+                    state.shm.replace(registry.bind(name, version, qhandle, ()));
                 }
                 _ => {}
             },
@@ -683,11 +778,11 @@ impl Dispatch<WlCallback, usize> for App {
 
 impl Dispatch<WlSeat, ()> for App {
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         proxy: &WlSeat,
         event: <WlSeat as Proxy>::Event,
         _data: &(),
-        _conn: &Connection,
+        conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
         log::trace!("wl_seat::Event::{event:?}");
@@ -703,8 +798,21 @@ impl Dispatch<WlSeat, ()> for App {
             panic!("no pointer capability");
         }
 
+        assert!(state.keyboard.is_none());
         proxy.get_keyboard(qhandle, ());
-        proxy.get_pointer(qhandle, ());
+        state.keyboard = Some(Keyboard::default());
+
+        assert!(state.pointer.is_none());
+        state.pointer = Some(
+            Pointer::new(
+                proxy.get_pointer(qhandle, ()),
+                conn,
+                qhandle,
+                state.shm.clone().expect("shm is unavail"),
+                state.compositor.clone().expect("compositor is unavail"),
+            )
+            .expect("could not construct pointer"),
+        );
     }
 }
 
@@ -721,14 +829,22 @@ impl Dispatch<WlKeyboard, ()> for App {
 
         log::trace!("wl_keyboard::Event::{event:?}");
 
+        let Some(keyboard) = state.keyboard.as_mut() else {
+            return;
+        };
+
         match event {
             Enter {
                 serial, surface, ..
             } => {
                 state.keyboard_focused_surface_id = Some(get_surface_id(&surface));
+                state
+                    .serial_tracker
+                    .update_serial(SerialType::KeyboardEnter, serial);
             }
-            Leave { serial, .. } => {
+            Leave { .. } => {
                 state.keyboard_focused_surface_id = None;
+                state.serial_tracker.reset_serial(SerialType::KeyboardEnter);
             }
             Keymap { format, fd, size } => match format {
                 WEnum::Value(value) => match value {
@@ -736,12 +852,12 @@ impl Dispatch<WlKeyboard, ()> for App {
                         log::warn!("non-xkb keymap");
                     }
                     wl_keyboard::KeymapFormat::XkbV1 => {
-                        assert!(state.keyboard.xkb_context.is_none());
+                        assert!(keyboard.xkb_context.is_none());
                         let xkb_context = unsafe {
                             xkbcommon::Context::from_fd(state.xkbcommon_lib, fd.as_fd(), size)
                                 .expect("failed to create xkb context")
                         };
-                        state.keyboard.xkb_context.replace(xkb_context);
+                        keyboard.xkb_context.replace(xkb_context);
                         log::info!("created xkb context");
                     }
                     _ => unreachable!(),
@@ -757,7 +873,7 @@ impl Dispatch<WlKeyboard, ()> for App {
                 group,
                 ..
             } => {
-                let Some(xkb_context) = state.keyboard.xkb_context.as_mut() else {
+                let Some(xkb_context) = keyboard.xkb_context.as_mut() else {
                     return;
                 };
                 unsafe {
@@ -769,7 +885,7 @@ impl Dispatch<WlKeyboard, ()> for App {
                 state: key_state,
                 ..
             } => {
-                let Some(xkb_context) = state.keyboard.xkb_context.as_mut() else {
+                let Some(xkb_context) = keyboard.xkb_context.as_mut() else {
                     return;
                 };
                 let scancode = Scancode::from_int(key);
@@ -808,6 +924,10 @@ impl Dispatch<WlPointer, ()> for App {
 
         log::trace!("wl_keyboard::Event::{event:?}");
 
+        let Some(pointer) = state.pointer.as_mut() else {
+            return;
+        };
+
         match event {
             Enter {
                 serial,
@@ -815,18 +935,22 @@ impl Dispatch<WlPointer, ()> for App {
                 surface_x,
                 surface_y,
             } => {
+                pointer.position = Vec2::new(surface_x as f32, surface_y as f32);
                 state.pointer_focused_surface_id = Some(get_surface_id(&surface));
-                state.pointer.position = Vec2::new(surface_x as f32, surface_y as f32);
+                state
+                    .serial_tracker
+                    .update_serial(SerialType::PointerEnter, serial);
             }
-            Leave { serial, .. } => {
+            Leave { .. } => {
                 state.pointer_focused_surface_id = None;
+                state.serial_tracker.reset_serial(SerialType::PointerEnter);
             }
             Motion {
                 surface_x,
                 surface_y,
                 ..
             } => {
-                let prev_position = state.pointer.position;
+                let prev_position = pointer.position;
                 let next_position = Vec2::new(surface_x as f32, surface_y as f32);
                 let frame_event = PointerEvent {
                     kind: input::PointerEventKind::Motion {
@@ -836,11 +960,11 @@ impl Dispatch<WlPointer, ()> for App {
                         .pointer_focused_surface_id
                         .expect("pointer didn't enter?"),
                     position: next_position,
-                    buttons: state.pointer.buttons.clone(),
+                    buttons: pointer.buttons.clone(),
                 };
 
-                state.pointer.position = next_position;
-                state.pointer.frame_events.push_back(frame_event);
+                pointer.position = next_position;
+                pointer.frame_events.push_back(frame_event);
             }
             Button {
                 button,
@@ -859,7 +983,7 @@ impl Dispatch<WlPointer, ()> for App {
                 };
                 let pressed = event_kind == PointerEventKind::Press { button };
                 let next_buttons = {
-                    let mut nb = state.pointer.buttons.clone();
+                    let mut nb = pointer.buttons.clone();
                     match button {
                         PointerButton::Left => nb.left = pressed,
                         _ => {}
@@ -871,17 +995,17 @@ impl Dispatch<WlPointer, ()> for App {
                     surface_id: state
                         .pointer_focused_surface_id
                         .expect("pointer didn't enter?"),
-                    position: state.pointer.position.clone(),
+                    position: pointer.position.clone(),
                     buttons: next_buttons.clone(),
                 };
 
-                state.pointer.buttons = next_buttons;
-                state.pointer.frame_events.push_back(frame_event);
+                pointer.buttons = next_buttons;
+                pointer.frame_events.push_back(frame_event);
             }
             Frame => {
                 state
                     .events
-                    .extend(state.pointer.frame_events.drain(..).map(Event::Pointer));
+                    .extend(pointer.frame_events.drain(..).map(Event::Pointer));
             }
             _ => {}
         }
@@ -899,6 +1023,7 @@ delegate_noop!(App: ignore WlBuffer);
 delegate_noop!(App: ignore WlCompositor);
 delegate_noop!(App: ignore WlOutput);
 delegate_noop!(App: ignore WlSurface);
+delegate_noop!(App: ignore WlShm);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -934,12 +1059,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         screencopy_manager: None,
         seat: None,
         viewporter: None,
+        shm: None,
 
         screens: vec![],
 
         keyboard: Default::default(),
         pointer: Default::default(),
-
+        serial_tracker: Default::default(),
         keyboard_focused_surface_id: None,
         pointer_focused_surface_id: None,
 

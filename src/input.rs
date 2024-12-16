@@ -79,6 +79,31 @@ pub struct PointerEvent {
     pub buttons: PointerButtons,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CursorShape {
+    Default,
+    Crosshair,
+    Move,
+    NwResize,
+    NeResize,
+    SeResize,
+    SwResize,
+}
+
+impl CursorShape {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Crosshair => "crosshair",
+            Self::Move => "move",
+            Self::NwResize => "nw-resize",
+            Self::NeResize => "ne-resize",
+            Self::SeResize => "se-resize",
+            Self::SwResize => "sw-resize",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Event {
     Keyboard(KeyboardEvent),
