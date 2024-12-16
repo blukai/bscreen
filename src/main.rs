@@ -1,3 +1,4 @@
+mod crop;
 mod dynlib;
 mod egl;
 mod gfx;
@@ -8,18 +9,24 @@ mod xkbcommon;
 
 use std::collections::VecDeque;
 use std::ffi::c_int;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::os::fd::{AsFd, BorrowedFd};
 
 use anyhow::{anyhow, Context};
+use crop::Crop;
 use gfx::{DrawBuffer, Rect, RectFill, Size};
 use glam::Vec2;
-use input::{Event, KeyboardEvent, KeyboardEventKind, Scancode};
+use input::{
+    Event, KeyboardEvent, KeyboardEventKind, PointerButton, PointerButtons, PointerEvent,
+    PointerEventKind, Scancode,
+};
 use renderer::Renderer;
 use wayland_client::protocol::wl_buffer::WlBuffer;
 use wayland_client::protocol::wl_callback::{self, WlCallback};
 use wayland_client::protocol::wl_compositor::WlCompositor;
-use wayland_client::protocol::wl_keyboard::{self, KeyState, WlKeyboard};
+use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
 use wayland_client::protocol::wl_output::WlOutput;
+use wayland_client::protocol::wl_pointer::{self, WlPointer};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_seat::{self, WlSeat};
 use wayland_client::protocol::wl_surface::WlSurface;
@@ -170,6 +177,7 @@ struct Screen {
     logical_size: Option<Size>,
     egl_window: Option<WlEglWindow>,
     egl_window_surface: Option<egl::WindowSurface>,
+    crop: Crop,
 }
 
 impl Screen {
@@ -200,6 +208,8 @@ impl Screen {
             RectFill::TextureHandle(screencopy_dmabuf.gl_texture.handle),
         );
 
+        self.crop.draw(draw_buffer);
+
         unsafe {
             renderer.draw(logical_size, fractional_scale, draw_buffer);
 
@@ -208,6 +218,24 @@ impl Screen {
 
         Ok(())
     }
+}
+
+fn get_surface_id(surface: &WlSurface) -> u64 {
+    let mut s = DefaultHasher::new();
+    surface.hash(&mut s);
+    s.finish()
+}
+
+#[derive(Default)]
+struct Keyboard {
+    xkb_context: Option<xkbcommon::Context>,
+}
+
+#[derive(Default)]
+struct Pointer {
+    position: Vec2,
+    buttons: PointerButtons,
+    frame_events: VecDeque<PointerEvent>,
 }
 
 struct App {
@@ -225,7 +253,14 @@ struct App {
     viewporter: Option<WpViewporter>,
 
     screens: Vec<Screen>,
-    xkb_context: Option<xkbcommon::Context>,
+
+    keyboard: Keyboard,
+    pointer: Pointer,
+
+    // TODO: introduce screens state or something that will contain screens and focused surface
+    // infos
+    keyboard_focused_surface_id: Option<u64>,
+    pointer_focused_surface_id: Option<u64>,
 
     events: VecDeque<Event>,
     draw_buffer: DrawBuffer,
@@ -334,6 +369,44 @@ impl App {
             event_queue.blocking_dispatch(self)?;
         }
     }
+
+    fn update_all_screens(&mut self, event: &Event) {
+        let surface_id = match event {
+            Event::Pointer(ref pointer_event) => pointer_event.surface_id,
+            Event::Keyboard(ref keyboard_event) => keyboard_event.surface_id,
+        };
+        let screen_idx = self
+            .screens
+            .iter()
+            .enumerate()
+            .find(|(_, screen)| {
+                let surface = screen
+                    .surface
+                    .as_ref()
+                    .expect("screen surface to have been created");
+                get_surface_id(surface) == surface_id
+            })
+            .map(|(idx, _)| idx)
+            .expect("find screen by surface id");
+
+        let screen = self.screens.get_mut(screen_idx).unwrap();
+        let view_rect = Rect::new(
+            Vec2::ZERO,
+            screen.logical_size.unwrap().as_uvec2().as_vec2(),
+        );
+        let crop_mutated = screen.crop.update(view_rect, event);
+
+        // maybe clear crops on other screens
+        if crop_mutated {
+            for other_idx in 0..self.screens.len() {
+                if other_idx == screen_idx {
+                    continue;
+                }
+                let other = self.screens.get_mut(other_idx).unwrap();
+                _ = other.crop = Default::default();
+            }
+        }
+    }
 }
 
 impl Dispatch<WlRegistry, ()> for App {
@@ -387,6 +460,7 @@ impl Dispatch<WlRegistry, ()> for App {
                         logical_size: None,
                         egl_window: None,
                         egl_window_surface: None,
+                        crop: Crop::default(),
                     });
                 }
                 "wl_seat" => {
@@ -609,7 +683,7 @@ impl Dispatch<WlCallback, usize> for App {
 
 impl Dispatch<WlSeat, ()> for App {
     fn event(
-        state: &mut Self,
+        _state: &mut Self,
         proxy: &WlSeat,
         event: <WlSeat as Proxy>::Event,
         _data: &(),
@@ -622,11 +696,15 @@ impl Dispatch<WlSeat, ()> for App {
             return;
         };
         let capabilities = wl_seat::Capability::from_bits_truncate(capabilities.into());
-        if capabilities.contains(wl_seat::Capability::Keyboard) {
-            proxy.get_keyboard(qhandle, ());
-        } else {
-            state.xkb_context.take();
+        if !capabilities.contains(wl_seat::Capability::Keyboard) {
+            panic!("no keyboard capability");
         }
+        if !capabilities.contains(wl_seat::Capability::Pointer) {
+            panic!("no pointer capability");
+        }
+
+        proxy.get_keyboard(qhandle, ());
+        proxy.get_pointer(qhandle, ());
     }
 }
 
@@ -644,18 +722,26 @@ impl Dispatch<WlKeyboard, ()> for App {
         log::trace!("wl_keyboard::Event::{event:?}");
 
         match event {
+            Enter {
+                serial, surface, ..
+            } => {
+                state.keyboard_focused_surface_id = Some(get_surface_id(&surface));
+            }
+            Leave { serial, .. } => {
+                state.keyboard_focused_surface_id = None;
+            }
             Keymap { format, fd, size } => match format {
                 WEnum::Value(value) => match value {
                     wl_keyboard::KeymapFormat::NoKeymap => {
                         log::warn!("non-xkb keymap");
                     }
                     wl_keyboard::KeymapFormat::XkbV1 => {
-                        assert!(state.xkb_context.is_none());
+                        assert!(state.keyboard.xkb_context.is_none());
                         let xkb_context = unsafe {
                             xkbcommon::Context::from_fd(state.xkbcommon_lib, fd.as_fd(), size)
                                 .expect("failed to create xkb context")
                         };
-                        state.xkb_context.replace(xkb_context);
+                        state.keyboard.xkb_context.replace(xkb_context);
                         log::info!("created xkb context");
                     }
                     _ => unreachable!(),
@@ -671,7 +757,7 @@ impl Dispatch<WlKeyboard, ()> for App {
                 group,
                 ..
             } => {
-                let Some(xkb_context) = state.xkb_context.as_mut() else {
+                let Some(xkb_context) = state.keyboard.xkb_context.as_mut() else {
                     return;
                 };
                 unsafe {
@@ -683,25 +769,119 @@ impl Dispatch<WlKeyboard, ()> for App {
                 state: key_state,
                 ..
             } => {
-                let Some(xkb_context) = state.xkb_context.as_mut() else {
+                let Some(xkb_context) = state.keyboard.xkb_context.as_mut() else {
                     return;
                 };
                 let scancode = Scancode::from_int(key);
-                state.events.push_back(Event::Keyboard(KeyboardEvent {
+                let event = KeyboardEvent {
                     kind: match key_state {
-                        WEnum::Value(value) => {
-                            if value == KeyState::Pressed {
-                                KeyboardEventKind::Press { scancode }
-                            } else {
-                                KeyboardEventKind::Release { scancode }
-                            }
+                        WEnum::Value(wl_keyboard::KeyState::Pressed) => {
+                            KeyboardEventKind::Press { scancode }
+                        }
+                        WEnum::Value(wl_keyboard::KeyState::Released) => {
+                            KeyboardEventKind::Release { scancode }
                         }
                         _ => unreachable!(),
                     },
-                    // TODO: surface id (focus tracker)
-                    surface_id: 0,
+                    surface_id: state
+                        .keyboard_focused_surface_id
+                        .expect("keyboard didn't enter?"),
                     mods: xkb_context.mods.clone(),
-                }))
+                };
+                state.events.push_back(Event::Keyboard(event));
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlPointer, ()> for App {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlPointer,
+        event: <WlPointer as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        use wl_pointer::Event::*;
+
+        log::trace!("wl_keyboard::Event::{event:?}");
+
+        match event {
+            Enter {
+                serial,
+                surface,
+                surface_x,
+                surface_y,
+            } => {
+                state.pointer_focused_surface_id = Some(get_surface_id(&surface));
+                state.pointer.position = Vec2::new(surface_x as f32, surface_y as f32);
+            }
+            Leave { serial, .. } => {
+                state.pointer_focused_surface_id = None;
+            }
+            Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                let prev_position = state.pointer.position;
+                let next_position = Vec2::new(surface_x as f32, surface_y as f32);
+                let frame_event = PointerEvent {
+                    kind: input::PointerEventKind::Motion {
+                        delta: next_position - prev_position,
+                    },
+                    surface_id: state
+                        .pointer_focused_surface_id
+                        .expect("pointer didn't enter?"),
+                    position: next_position,
+                    buttons: state.pointer.buttons.clone(),
+                };
+
+                state.pointer.position = next_position;
+                state.pointer.frame_events.push_back(frame_event);
+            }
+            Button {
+                button,
+                state: button_state,
+                ..
+            } => {
+                let button = PointerButton::from_int(button);
+                let event_kind = match button_state {
+                    WEnum::Value(wl_pointer::ButtonState::Pressed) => {
+                        PointerEventKind::Press { button }
+                    }
+                    WEnum::Value(wl_pointer::ButtonState::Released) => {
+                        PointerEventKind::Release { button }
+                    }
+                    _ => unreachable!(),
+                };
+                let pressed = event_kind == PointerEventKind::Press { button };
+                let next_buttons = {
+                    let mut nb = state.pointer.buttons.clone();
+                    match button {
+                        PointerButton::Left => nb.left = pressed,
+                        _ => {}
+                    }
+                    nb
+                };
+                let frame_event = PointerEvent {
+                    kind: event_kind,
+                    surface_id: state
+                        .pointer_focused_surface_id
+                        .expect("pointer didn't enter?"),
+                    position: state.pointer.position.clone(),
+                    buttons: next_buttons.clone(),
+                };
+
+                state.pointer.buttons = next_buttons;
+                state.pointer.frame_events.push_back(frame_event);
+            }
+            Frame => {
+                state
+                    .events
+                    .extend(state.pointer.frame_events.drain(..).map(Event::Pointer));
             }
             _ => {}
         }
@@ -756,7 +936,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         viewporter: None,
 
         screens: vec![],
-        xkb_context: None,
+
+        keyboard: Default::default(),
+        pointer: Default::default(),
+
+        keyboard_focused_surface_id: None,
+        pointer_focused_surface_id: None,
 
         events: VecDeque::new(),
         draw_buffer: DrawBuffer::default(),
@@ -775,13 +960,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         while let Some(event) = app.events.pop_front() {
             match event {
-                Event::Keyboard(keyboard_event) => match keyboard_event.kind {
+                Event::Keyboard(ref keyboard_event) => match keyboard_event.kind {
                     KeyboardEventKind::Press {
                         scancode: Scancode::Esc,
                     } => app.quit = true,
                     _ => {}
                 },
+                Event::Pointer(_) => {}
             }
+
+            app.update_all_screens(&event);
         }
     }
 

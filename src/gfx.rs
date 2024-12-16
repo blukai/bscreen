@@ -14,7 +14,7 @@ pub enum TextureFormat {
 // NOTE: my definition of logical size matches wayland. but my defintion of
 // physical size does not, in wayland's terminology what i call physical size
 // most likely is buffer size.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Size {
     pub width: u32,
     pub height: u32,
@@ -47,7 +47,7 @@ impl Size {
 }
 
 #[repr(C)]
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Rgba8 {
     pub r: u8,
     pub g: u8,
@@ -68,7 +68,7 @@ impl Rgba8 {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub min: Vec2,
     pub max: Vec2,
@@ -94,11 +94,91 @@ impl Rect {
     pub fn bottom_right(&self) -> Vec2 {
         self.max
     }
+
+    pub fn set_top_left(&mut self, top_left: Vec2) {
+        self.min = top_left;
+    }
+
+    pub fn set_top_right(&mut self, top_right: Vec2) {
+        self.min = Vec2::new(self.min.x, top_right.y);
+        self.max = Vec2::new(top_right.x, self.max.y);
+    }
+
+    pub fn set_bottom_right(&mut self, bottom_right: Vec2) {
+        self.max = bottom_right;
+    }
+
+    pub fn set_bottom_left(&mut self, bottom_left: Vec2) {
+        self.min = Vec2::new(bottom_left.x, self.min.y);
+        self.max = Vec2::new(self.max.x, bottom_left.y);
+    }
+
+    pub fn from_center_size(center: Vec2, size: f32) -> Self {
+        let radius = Vec2::splat(size / 2.0);
+        Self {
+            min: center - radius,
+            max: center + radius,
+        }
+    }
+
+    pub fn contains(&self, p: &Vec2) -> bool {
+        let x = p.x >= self.min.x && p.x <= self.max.x;
+        let y = p.y >= self.min.y && p.y <= self.max.y;
+        x && y
+    }
+
+    pub fn normalize(&self) -> Self {
+        let mut ret = Self::default();
+        ret.min.x = self.min.x.min(self.max.x);
+        ret.min.y = self.min.y.min(self.max.y);
+        ret.max.x = self.min.x.max(self.max.x);
+        ret.max.y = self.min.y.max(self.max.y);
+        ret
+    }
+
+    pub fn constrain_to(&self, other: &Self) -> Self {
+        let mut ret = Self::default();
+        ret.min.x = self.min.x.max(other.min.x);
+        ret.min.y = self.min.y.max(other.min.y);
+        ret.max.x = self.max.x.min(other.max.x);
+        ret.max.y = self.max.y.min(other.max.y);
+        ret
+    }
+
+    pub fn translate(&self, delta: &Vec2) -> Self {
+        Self::new(self.min + delta, self.max + delta)
+    }
+
+    pub fn size(&self) -> Vec2 {
+        self.max - self.min
+    }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum RectFill {
     TextureHandle(u32),
     Color(Rgba8),
+}
+
+/// computes the vertex position offset away the from center caused by line width.
+fn compute_line_width_offset(a: &Vec2, b: &Vec2, width: f32) -> Vec2 {
+    // direction defines how the line is oriented in space. it allows to know
+    // which way to move the vertices to create the desired thickness.
+    let dir: Vec2 = b - a;
+
+    // normalizing the direction vector converts it into a unit vector (length
+    // of 1). normalization ensures that the offset is proportional to the line
+    // width, regardless of the line's length.
+    let norm_dir: Vec2 = dir.normalize_or_zero();
+
+    // create a vector that points outward from the line. we want to move the
+    // vertices away from the center of the line, not along its length.
+    let perp: Vec2 = norm_dir.perp();
+
+    // to distribute the offset evenly on both sides of the line
+    let offset = perp * (width * 0.5);
+
+    offset
 }
 
 #[repr(C)]
@@ -161,10 +241,47 @@ impl DrawBuffer {
         self.pending_indices = 0;
     }
 
-    pub fn push_rect_filled(&mut self, rect: Rect, rect_fill: RectFill) {
+    pub fn push_line(&mut self, a: Vec2, b: Vec2, width: f32, color: Rgba8) {
+        let idx = self.vertices.len() as u32;
+        let perp = compute_line_width_offset(&a, &b, width);
+
+        // top left
+        self.push_vertex(Vertex {
+            position: a - perp,
+            tex_coord: Vec2::new(0.0, 0.0),
+            color,
+        });
+        // top right
+        self.push_vertex(Vertex {
+            position: b - perp,
+            tex_coord: Vec2::new(1.0, 0.0),
+            color,
+        });
+        // bottom right
+        self.push_vertex(Vertex {
+            position: b + perp,
+            tex_coord: Vec2::new(1.0, 1.0),
+            color,
+        });
+        // bottom left
+        self.push_vertex(Vertex {
+            position: a + perp,
+            tex_coord: Vec2::new(0.0, 1.0),
+            color,
+        });
+
+        // top left -> top right -> bottom right
+        self.push_triangle(idx + 0, idx + 1, idx + 2);
+        // bottom right -> bottom left -> top left
+        self.push_triangle(idx + 2, idx + 3, idx + 0);
+
+        self.commit(None);
+    }
+
+    pub fn push_rect_filled(&mut self, rect: Rect, fill: RectFill) {
         let idx = self.vertices.len() as u32;
 
-        let (color, texture_handle) = match rect_fill {
+        let (color, texture_handle) = match fill {
             RectFill::Color(color) => (color, None),
             RectFill::TextureHandle(texture_handle) => (Rgba8::WHITE, Some(texture_handle)),
         };
@@ -200,5 +317,62 @@ impl DrawBuffer {
         self.push_triangle(idx + 2, idx + 3, idx + 0);
 
         self.commit(texture_handle);
+    }
+
+    pub fn push_rect_outlined(&mut self, rect: Rect, width: f32, color: Rgba8) {
+        let top_left = rect.min;
+        let top_right = Vec2::new(rect.max.x, rect.min.y);
+        let bottom_right = rect.max;
+        let bottom_left = Vec2::new(rect.min.x, rect.max.y);
+
+        let offset = width * 0.5;
+
+        // horizontal lines:
+        // extened to left and right by outline width, shifted to top by half of
+        // outline width.
+        self.push_line(
+            Vec2::new(top_left.x - width, top_left.y - offset),
+            Vec2::new(top_right.x + width, top_right.y - offset),
+            width,
+            color,
+        );
+        self.push_line(
+            Vec2::new(bottom_left.x - width, bottom_left.y + offset),
+            Vec2::new(bottom_right.x + width, bottom_right.y + offset),
+            width,
+            color,
+        );
+
+        // vertical lines:
+        // shifted to right and left by half of outlined width
+        self.push_line(
+            Vec2::new(top_right.x + offset, top_right.y),
+            Vec2::new(bottom_right.x + offset, bottom_right.y),
+            width,
+            color,
+        );
+        self.push_line(
+            Vec2::new(top_left.x - offset, top_left.y),
+            Vec2::new(bottom_left.x - offset, bottom_left.y),
+            width,
+            color,
+        );
+
+        self.commit(None);
+    }
+
+    pub fn push_rect(
+        &mut self,
+        rect: Rect,
+        fill: Option<RectFill>,
+        outline_width: Option<f32>,
+        outline_color: Option<Rgba8>,
+    ) {
+        if let Some(fill) = fill {
+            self.push_rect_filled(rect.clone(), fill);
+        }
+        if let (Some(width), Some(color)) = (outline_width, outline_color) {
+            self.push_rect_outlined(rect, width, color);
+        }
     }
 }

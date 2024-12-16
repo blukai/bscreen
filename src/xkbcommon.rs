@@ -8,6 +8,7 @@ use std::ptr::null_mut;
 use anyhow::anyhow;
 
 use crate::dynlib::{opaque_struct, DynLib};
+use crate::input::KeyboardMods;
 
 pub const XKB_MOD_NAME_CTRL: &[u8] = b"Control\0";
 
@@ -105,14 +106,8 @@ impl Lib {
 }
 
 #[derive(Debug)]
-pub struct ModIndices {
+pub struct KeyboardModIndices {
     pub ctrl: xkb_mod_index_t,
-}
-
-// NOTE: in zig this would have been packed struct(u8), but rust is rust.
-#[derive(Debug, Clone)]
-pub struct Mods {
-    ctrl: bool,
 }
 
 pub struct Context {
@@ -120,8 +115,8 @@ pub struct Context {
     pub context: *mut xkb_context,
     pub keymap: *mut xkb_keymap,
     pub state: *mut xkb_state,
-    pub mod_indices: ModIndices,
-    pub mods: Mods,
+    pub mod_indices: KeyboardModIndices,
+    pub mods: KeyboardMods,
 }
 
 impl Context {
@@ -167,13 +162,13 @@ impl Context {
             context,
             keymap,
             state,
-            mod_indices: ModIndices {
+            mod_indices: KeyboardModIndices {
                 ctrl: (xkbcommon_lib.xkb_keymap_mod_get_index)(
                     keymap,
                     XKB_MOD_NAME_CTRL.as_ptr() as _,
                 ),
             },
-            mods: Mods { ctrl: false },
+            mods: KeyboardMods { ctrl: false },
             xkbcommon: xkbcommon_lib,
         })
     }
