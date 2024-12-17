@@ -5,7 +5,7 @@ use crate::{
     input::{CursorShape, Event, PointerEventKind},
 };
 
-mod theme {
+pub mod theme {
     use crate::gfx::Rgba8;
 
     pub const HANDLE_SIZE: f32 = 13.0;
@@ -73,9 +73,9 @@ fn pointer_on_handle(rect: &Rect, pointer_location: &Vec2) -> Option<HandleType>
 
 #[derive(Debug, Default)]
 pub struct Crop {
-    view_rect: Option<Rect>,
-    crop_rect: Option<Rect>,
-    handle: Option<HandleType>,
+    pub view_rect: Option<Rect>,
+    pub crop_rect: Option<Rect>,
+    pub handle: Option<HandleType>,
     pub cursor: Option<CursorShape>,
 }
 

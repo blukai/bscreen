@@ -1,8 +1,12 @@
 use std::{ops::Deref, ptr::null};
 
 use anyhow::anyhow;
+use glam::Vec2;
 
-use crate::{egl, gfx};
+use crate::{
+    egl,
+    gfx::{self, Rect, Size},
+};
 
 pub mod sys {
     #[allow(non_camel_case_types)]
@@ -227,4 +231,35 @@ impl Drop for Buffer {
             self.gl_lib.DeleteBuffers(1, &self.handle);
         }
     }
+}
+
+// TODO: it might make senst to require Rect and Size to be generic over u32 instead of f32 here.
+pub unsafe fn read_pixels(gl_lib: &'static Lib, read_rect: Rect, view_size: Size) -> Vec<u8> {
+    // TODO: maybe unhardcode this and instead rely on TextureFormat
+    const COMPONENTS: usize = 4;
+    let size: usize = read_rect.width() as usize * read_rect.height() as usize * COMPONENTS;
+    let stride: usize = read_rect.width() as usize * COMPONENTS;
+    let flipped_read_rect = Rect::new(
+        Vec2::new(read_rect.min.x, view_size.height as f32 - read_rect.max.y),
+        Vec2::new(read_rect.max.x, view_size.height as f32 - read_rect.min.y),
+    );
+
+    let mut pixels: Vec<u8> = Vec::with_capacity(size);
+    gl_lib.ReadPixels(
+        flipped_read_rect.min.x as _,
+        flipped_read_rect.min.y as _,
+        flipped_read_rect.width() as _,
+        flipped_read_rect.height() as _,
+        sys::RGBA,
+        sys::UNSIGNED_BYTE,
+        pixels.as_mut_ptr() as _,
+    );
+    pixels.set_len(size);
+
+    let mut pixels_flipped: Vec<u8> = Vec::with_capacity(size);
+    for row in pixels.chunks_exact(stride).rev() {
+        pixels_flipped.extend_from_slice(row);
+    }
+
+    pixels_flipped
 }

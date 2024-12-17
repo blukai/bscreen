@@ -10,7 +10,7 @@ mod xkbcommon;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_int;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
 use anyhow::{anyhow, Context};
 use crop::Crop;
@@ -24,6 +24,9 @@ use renderer::Renderer;
 use wayland_client::protocol::wl_buffer::WlBuffer;
 use wayland_client::protocol::wl_callback::{self, WlCallback};
 use wayland_client::protocol::wl_compositor::WlCompositor;
+use wayland_client::protocol::wl_data_device::WlDataDevice;
+use wayland_client::protocol::wl_data_device_manager::WlDataDeviceManager;
+use wayland_client::protocol::wl_data_source::{self, WlDataSource};
 use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
 use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_pointer::{self, WlPointer};
@@ -182,43 +185,17 @@ struct Screen {
     crop: Crop,
 }
 
-impl Screen {
-    fn draw(
-        &self,
-        egl_context: &'static egl::Context,
-        gl_lib: &'static gl::Lib,
-        draw_buffer: &mut DrawBuffer,
-        renderer: &Renderer,
-    ) -> anyhow::Result<()> {
-        let egl_window_surface = self.egl_window_surface.as_ref().unwrap();
-        let screencopy = self.screencopy.as_ref().unwrap();
-        let screencopy_dmabuf = screencopy.dmabuf.as_ref().unwrap();
-        let logical_size = self.logical_size.unwrap();
-        let fractional_scale = self.fractional_scale.unwrap_or(1.0);
+struct ScreenDrawOpts {
+    draw_crop_rect: bool,
+    swap_buffers: bool,
+}
 
-        unsafe {
-            egl_context.make_current(egl_window_surface.handle)?;
-
-            gl_lib.ClearColor(0.0, 0.0, 0.0, 0.0);
-            gl_lib.Clear(gl::sys::COLOR_BUFFER_BIT);
+impl Default for ScreenDrawOpts {
+    fn default() -> Self {
+        Self {
+            draw_crop_rect: true,
+            swap_buffers: true,
         }
-
-        draw_buffer.clear();
-
-        draw_buffer.push_rect_filled(
-            Rect::new(Vec2::splat(0.0), logical_size.as_uvec2().as_vec2()),
-            RectFill::TextureHandle(screencopy_dmabuf.gl_texture.handle),
-        );
-
-        self.crop.draw(draw_buffer);
-
-        unsafe {
-            renderer.draw(logical_size, fractional_scale, draw_buffer);
-
-            egl_context.swap_buffers(egl_window_surface.handle)?;
-        }
-
-        Ok(())
     }
 }
 
@@ -325,6 +302,19 @@ impl Pointer {
     }
 }
 
+struct ClipboardDataOffer {
+    data_source: WlDataSource,
+
+    mime_type: String,
+    data: Vec<u8>,
+}
+
+struct Clipboard {
+    data_device: WlDataDevice,
+
+    data_offer: Option<ClipboardDataOffer>,
+}
+
 struct App {
     egl_lib: &'static egl::Lib,
     egl_context: &'static egl::Context,
@@ -339,6 +329,7 @@ struct App {
     seat: Option<WlSeat>,
     viewporter: Option<WpViewporter>,
     shm: Option<WlShm>,
+    data_device_manager: Option<WlDataDeviceManager>,
 
     screens: Vec<Screen>,
 
@@ -348,11 +339,13 @@ struct App {
     serial_tracker: SerialTracker,
     keyboard_focused_surface_id: Option<u64>,
     pointer_focused_surface_id: Option<u64>,
+    clipboard: Option<Clipboard>,
 
     events: VecDeque<Event>,
     draw_buffer: DrawBuffer,
     renderer: Renderer,
 
+    copy: bool,
     quit: bool,
 }
 
@@ -499,6 +492,176 @@ impl App {
             }
         }
     }
+
+    fn draw_screen(&mut self, screen_idx: usize, opts: ScreenDrawOpts) -> anyhow::Result<()> {
+        let screen = &self.screens[screen_idx];
+
+        let egl_window_surface = screen.egl_window_surface.as_ref().unwrap();
+        let screencopy = screen.screencopy.as_ref().unwrap();
+        let screencopy_dmabuf = screencopy.dmabuf.as_ref().unwrap();
+        let logical_size = screen.logical_size.unwrap();
+        let fractional_scale = screen.fractional_scale.unwrap_or(1.0);
+        let view_rect = Rect::new(Vec2::splat(0.0), logical_size.as_uvec2().as_vec2());
+
+        unsafe {
+            self.egl_context.make_current(egl_window_surface.handle)?;
+
+            self.gl_lib.ClearColor(0.0, 0.0, 0.0, 0.0);
+            self.gl_lib.Clear(gl::sys::COLOR_BUFFER_BIT);
+        }
+
+        self.draw_buffer.clear();
+
+        self.draw_buffer.push_rect_filled(
+            view_rect,
+            RectFill::TextureHandle(screencopy_dmabuf.gl_texture.handle),
+        );
+
+        if opts.draw_crop_rect {
+            screen.crop.draw(&mut self.draw_buffer);
+
+            // maybe darken if any other screen has crop
+            if screen.crop.crop_rect.is_none() {
+                let other_has_crop_rect =
+                    self.screens.iter().enumerate().any(|(other_idx, other)| {
+                        other_idx != screen_idx && other.crop.crop_rect.is_some()
+                    });
+                if other_has_crop_rect {
+                    self.draw_buffer
+                        .push_rect_filled(view_rect, RectFill::Color(crop::theme::OUTSIDE_BG));
+                }
+            }
+        }
+
+        unsafe {
+            self.renderer
+                .draw(logical_size, fractional_scale, &self.draw_buffer);
+
+            if opts.swap_buffers {
+                assert!(!self.copy);
+
+                self.egl_context.swap_buffers(egl_window_surface.handle)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn offer_clipboard_data(
+        &mut self,
+        event_queue: &mut EventQueue<Self>,
+        qhandle: &QueueHandle<Self>,
+        mime_type: String,
+        data: Vec<u8>,
+    ) {
+        let Some(serial) = self.serial_tracker.get_serial(SerialType::KeyboardEnter) else {
+            log::warn!("failed to write clipboard data (no keyboard press serial found)");
+            return;
+        };
+
+        let data_device_manager = self
+            .data_device_manager
+            .as_ref()
+            .expect("data device manager is unavail");
+        let seat = self.seat.as_ref().expect("seat is unavail");
+
+        let clipboard = self.clipboard.get_or_insert_with(|| Clipboard {
+            data_device: data_device_manager.get_data_device(seat, qhandle, ()),
+            data_offer: None,
+        });
+
+        if let Some(data_offer) = clipboard.data_offer.take() {
+            data_offer.data_source.destroy();
+        }
+
+        let data_source = data_device_manager.create_data_source(qhandle, ());
+        data_source.offer("image/png".to_string());
+
+        clipboard
+            .data_device
+            .set_selection(Some(&data_source), serial);
+
+        clipboard.data_offer = Some(ClipboardDataOffer {
+            data_source,
+
+            mime_type,
+            data,
+        });
+
+        event_queue.flush().expect("could not flush");
+    }
+
+    fn handle_copy_request(
+        &mut self,
+        event_queue: &mut EventQueue<Self>,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        let Some(idx) = self
+            .screens
+            .iter_mut()
+            .enumerate()
+            .find(|(_, screen)| screen.crop.crop_rect.is_some())
+            .map(|(idx, _)| idx)
+        else {
+            return;
+        };
+        assert!(self.screens[idx].crop.view_rect.is_some());
+
+        self.copy = true;
+
+        for screen in self.screens.iter_mut() {
+            let layer_surface = screen.layer_surface.take().unwrap();
+            // NOTE: drop(layer_surface) doesn't do the thing.
+            layer_surface.destroy();
+            screen.layer_surface_configured = false;
+        }
+        log::info!("destroyed layer surfaces on all screens");
+
+        self.draw_screen(
+            idx,
+            ScreenDrawOpts {
+                draw_crop_rect: false,
+                swap_buffers: false,
+            },
+        )
+        .expect("failed to draw");
+
+        let (pixels, size) = {
+            let screen = &self.screens[idx];
+            let fractional_scale = screen.fractional_scale.unwrap_or(1.0);
+            let read_rect = screen.crop.crop_rect.clone().unwrap() * fractional_scale as f32;
+            let view_size = screen
+                .logical_size
+                .as_ref()
+                .unwrap()
+                .to_physical(fractional_scale);
+
+            let pixels = unsafe { gl::read_pixels(self.gl_lib, read_rect, view_size) };
+
+            (pixels, read_rect.size())
+        };
+
+        self.screens.clear();
+        log::info!("destroyed all screens");
+
+        // TODO: encode pixels to png
+        let mut data: Vec<u8> = Vec::new();
+
+        {
+            let mut encoder = png::Encoder::new(&mut data, size.x as u32, size.y as u32);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_compression(png::Compression::Fast);
+
+            let mut writer = encoder.write_header().expect("could not write png header");
+            writer
+                .write_image_data(&pixels)
+                .expect("could not write png data");
+        }
+
+        // TODO: send a clipboard data offer
+        self.offer_clipboard_data(event_queue, qhandle, "image/png".to_string(), data);
+    }
 }
 
 impl Dispatch<WlRegistry, ()> for App {
@@ -575,6 +738,11 @@ impl Dispatch<WlRegistry, ()> for App {
                 }
                 "wl_shm" => {
                     state.shm.replace(registry.bind(name, version, qhandle, ()));
+                }
+                "wl_data_device_manager" => {
+                    state
+                        .data_device_manager
+                        .replace(registry.bind(name, version, qhandle, ()));
                 }
                 _ => {}
             },
@@ -682,7 +850,6 @@ impl Dispatch<ZwlrLayerSurfaceV1, usize> for App {
         log::trace!("zwlr_layer_surface_v1::Event::{event:?}");
 
         let idx = *data;
-        let screen = &mut state.screens[idx];
 
         match event {
             Configure {
@@ -694,13 +861,12 @@ impl Dispatch<ZwlrLayerSurfaceV1, usize> for App {
                 proxy.ack_configure(serial);
 
                 let logical_size = Size::new(width, height);
-                let physical_size =
-                    logical_size.to_physical(screen.fractional_scale.unwrap_or(1.0));
+                let fractional_scale = state.screens[idx].fractional_scale.unwrap_or(1.0);
+                let physical_size = logical_size.to_physical(fractional_scale);
 
-                let surface = screen.surface.as_ref().unwrap();
-
+                let surface_id = state.screens[idx].surface.as_ref().unwrap().id();
                 let egl_window = WlEglWindow::new(
-                    surface.id(),
+                    surface_id,
                     physical_size.width as i32,
                     physical_size.height as i32,
                 )
@@ -710,27 +876,29 @@ impl Dispatch<ZwlrLayerSurfaceV1, usize> for App {
                         .expect("failed to create egl window surface")
                 };
 
-                let Some(viewport) = screen.viewport.as_ref() else {
-                    unreachable!()
-                };
-                viewport.set_destination(logical_size.width as i32, logical_size.height as i32);
-                surface.commit();
+                state.screens[idx]
+                    .viewport
+                    .as_ref()
+                    .unwrap()
+                    .set_destination(logical_size.width as i32, logical_size.height as i32);
+                state.screens[idx].surface.as_ref().unwrap().commit();
 
-                screen.layer_surface_configured = true;
-                screen.logical_size.replace(logical_size);
-                screen.egl_window.replace(egl_window);
-                screen.egl_window_surface.replace(egl_window_surface);
+                state.screens[idx].layer_surface_configured = true;
+                state.screens[idx].logical_size.replace(logical_size);
+                state.screens[idx].egl_window.replace(egl_window);
+                state.screens[idx]
+                    .egl_window_surface
+                    .replace(egl_window_surface);
 
-                screen
-                    .draw(
-                        state.egl_context,
-                        state.gl_lib,
-                        &mut state.draw_buffer,
-                        &state.renderer,
-                    )
+                state
+                    .draw_screen(idx, ScreenDrawOpts::default())
                     .expect("failed to draw");
 
-                surface.frame(qhandle, idx);
+                state.screens[idx]
+                    .surface
+                    .as_ref()
+                    .unwrap()
+                    .frame(qhandle, idx);
             }
             Closed => unimplemented!(),
             _ => unreachable!(),
@@ -752,23 +920,18 @@ impl Dispatch<WlCallback, usize> for App {
         log::trace!("wl_callback::Event::{event:?}");
 
         let idx = *data;
-        let screen = &mut state.screens[idx];
 
         match event {
             Done { .. } => {
-                let Some(surface) = screen.surface.as_ref() else {
-                    unreachable!()
-                };
+                if state.copy {
+                    return;
+                }
 
-                screen
-                    .draw(
-                        state.egl_context,
-                        state.gl_lib,
-                        &mut state.draw_buffer,
-                        &state.renderer,
-                    )
+                state
+                    .draw_screen(idx, ScreenDrawOpts::default())
                     .expect("failed to draw");
 
+                let surface = &state.screens[idx].surface.as_ref().unwrap();
                 surface.frame(qhandle, idx);
             }
             _ => unreachable!(),
@@ -1012,6 +1175,62 @@ impl Dispatch<WlPointer, ()> for App {
     }
 }
 
+impl Dispatch<WlDataSource, ()> for App {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlDataSource,
+        event: <WlDataSource as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        use wl_data_source::Event::*;
+
+        log::trace!("wl_keyboard::Event::{event:?}");
+
+        let Some(clipboard) = state.clipboard.as_ref() else {
+            log::warn!("received data source event, but clipboard is None");
+            return;
+        };
+        let Some(data_offer) = clipboard.data_offer.as_ref() else {
+            log::warn!("received data source event, but clipboard data offer is None");
+            return;
+        };
+
+        match event {
+            Send { mime_type, fd } => {
+                // TODO: can we receive request for other mime, not the one that was
+                // offered? probably not?
+                assert!(mime_type.eq(&data_offer.mime_type));
+
+                unsafe {
+                    let n = libc::write(
+                        fd.as_raw_fd(),
+                        data_offer.data.as_ptr() as _,
+                        data_offer.data.len(),
+                    );
+
+                    // TODO: do i need to handle cases when n is not equal to len of data?
+                    assert!(n as usize == data_offer.data.len());
+                }
+
+                state.quit = true;
+            }
+            Cancelled => {
+                state.quit = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+delegate_noop!(App: ignore WlBuffer);
+delegate_noop!(App: ignore WlCompositor);
+delegate_noop!(App: ignore WlDataDevice);
+delegate_noop!(App: ignore WlDataDeviceManager);
+delegate_noop!(App: ignore WlOutput);
+delegate_noop!(App: ignore WlShm);
+delegate_noop!(App: ignore WlSurface);
 delegate_noop!(App: ignore WpFractionalScaleManagerV1);
 delegate_noop!(App: ignore WpViewport);
 delegate_noop!(App: ignore WpViewporter);
@@ -1019,11 +1238,6 @@ delegate_noop!(App: ignore ZwlrLayerShellV1);
 delegate_noop!(App: ignore ZwlrScreencopyManagerV1);
 delegate_noop!(App: ignore ZwpLinuxBufferParamsV1);
 delegate_noop!(App: ignore ZwpLinuxDmabufV1);
-delegate_noop!(App: ignore WlBuffer);
-delegate_noop!(App: ignore WlCompositor);
-delegate_noop!(App: ignore WlOutput);
-delegate_noop!(App: ignore WlSurface);
-delegate_noop!(App: ignore WlShm);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -1060,6 +1274,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         seat: None,
         viewporter: None,
         shm: None,
+        data_device_manager: None,
 
         screens: vec![],
 
@@ -1068,11 +1283,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         serial_tracker: Default::default(),
         keyboard_focused_surface_id: None,
         pointer_focused_surface_id: None,
+        clipboard: None,
 
         events: VecDeque::new(),
         draw_buffer: DrawBuffer::default(),
         renderer: unsafe { Renderer::new(gl_lib)? },
 
+        copy: false,
         quit: false,
     };
 
@@ -1084,12 +1301,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while !app.quit {
         event_queue.blocking_dispatch(&mut app)?;
 
+        if app.copy {
+            continue;
+        }
+
         while let Some(event) = app.events.pop_front() {
             match event {
                 Event::Keyboard(ref keyboard_event) => match keyboard_event.kind {
                     KeyboardEventKind::Press {
                         scancode: Scancode::Esc,
                     } => app.quit = true,
+                    KeyboardEventKind::Press {
+                        scancode: Scancode::C,
+                    } if keyboard_event.mods.ctrl => {
+                        app.handle_copy_request(&mut event_queue, &qhandle);
+                        continue;
+                    }
                     _ => {}
                 },
                 Event::Pointer(_) => {}

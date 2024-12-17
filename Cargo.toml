@@ -1,15 +1,15 @@
 [package]
 name = "bscreen"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-bytemuck = { version = "1.20", features = ["derive"] }
 env_logger = "0.11"
-glam = { version = "0.29", features = ["bytemuck"] }
+glam = "0.29"
 libc = "0.2"
 log = "0.4"
+png = "0.17"
 wayland-backend = { version = "0.3", features = ["dlopen", "client_system"] }
 wayland-client = { version = "0.31", features = ["log"] }
 wayland-cursor = "0.31"

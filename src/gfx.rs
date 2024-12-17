@@ -41,6 +41,7 @@ impl Size {
         }
     }
 
+    #[inline]
     pub fn as_uvec2(&self) -> UVec2 {
         UVec2::new(self.width, self.height)
     }
@@ -149,8 +150,28 @@ impl Rect {
         Self::new(self.min + delta, self.max + delta)
     }
 
+    pub fn width(&self) -> f32 {
+        self.max.x - self.min.x
+    }
+
+    pub fn height(&self) -> f32 {
+        self.max.y - self.min.y
+    }
+
     pub fn size(&self) -> Vec2 {
         self.max - self.min
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.width() <= 0.0 || self.height() <= 0.0
+    }
+}
+
+impl std::ops::Mul<f32> for Rect {
+    type Output = Self;
+
+    fn mul(self, factor: f32) -> Self::Output {
+        Self::new(self.min * factor, self.max * factor)
     }
 }
 

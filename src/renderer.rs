@@ -26,7 +26,7 @@ pub struct Renderer {
 impl Renderer {
     pub unsafe fn new(gl_lib: &'static gl::Lib) -> anyhow::Result<Self> {
         let program = gl::Program::new(gl_lib, VERT_SRC, FRAG_SRC)?;
-        Ok(Self {
+        let renderer = Self {
             a_position_location: gl_lib
                 .GetAttribLocation(program.handle, "a_position\0".as_ptr() as _),
             a_tex_coord_location: gl_lib
@@ -48,10 +48,20 @@ impl Renderer {
                 Some(&[255, 255, 255, 255]),
             ),
             gl_lib,
-        })
+        };
+
+        renderer.setup();
+
+        Ok(renderer)
     }
 
-    pub unsafe fn setup_buffers(&self) {
+    pub unsafe fn setup(&self) {
+        self.gl_lib.UseProgram(self.program.handle);
+
+        self.gl_lib.Enable(gl::sys::BLEND);
+        self.gl_lib
+            .BlendFunc(gl::sys::SRC_ALPHA, gl::sys::ONE_MINUS_SRC_ALPHA);
+
         // vertex
         self.gl_lib
             .BindBuffer(gl::sys::ARRAY_BUFFER, self.vbo.handle);
@@ -94,12 +104,6 @@ impl Renderer {
     pub unsafe fn draw(&self, logical_size: Size, fractional_scale: f64, draw_buffer: &DrawBuffer) {
         let physical_size = logical_size.to_physical(fractional_scale);
 
-        self.gl_lib.UseProgram(self.program.handle);
-
-        self.gl_lib.Enable(gl::sys::BLEND);
-        self.gl_lib
-            .BlendFunc(gl::sys::SRC_ALPHA, gl::sys::ONE_MINUS_SRC_ALPHA);
-
         self.gl_lib
             .Viewport(0, 0, physical_size.width as _, physical_size.height as _);
 
@@ -108,8 +112,6 @@ impl Renderer {
             logical_size.width as _,
             logical_size.height as _,
         );
-
-        self.setup_buffers();
 
         self.gl_lib.BufferData(
             gl::sys::ARRAY_BUFFER,
