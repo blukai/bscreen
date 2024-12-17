@@ -59,8 +59,13 @@ impl Renderer {
         self.gl_lib.UseProgram(self.program.handle);
 
         self.gl_lib.Enable(gl::sys::BLEND);
-        self.gl_lib
-            .BlendFunc(gl::sys::SRC_ALPHA, gl::sys::ONE_MINUS_SRC_ALPHA);
+        self.gl_lib.BlendEquation(gl::sys::FUNC_ADD);
+        self.gl_lib.BlendFuncSeparate(
+            gl::sys::SRC_ALPHA,
+            gl::sys::ONE_MINUS_SRC_ALPHA,
+            gl::sys::ONE,
+            gl::sys::ONE_MINUS_SRC_ALPHA,
+        );
 
         // vertex
         self.gl_lib

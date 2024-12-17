@@ -75,7 +75,7 @@ fn pointer_on_handle(rect: &Rect, pointer_location: &Vec2) -> Option<HandleType>
 pub struct Crop {
     pub view_rect: Option<Rect>,
     pub crop_rect: Option<Rect>,
-    pub handle: Option<HandleType>,
+    handle: Option<HandleType>,
     pub cursor: Option<CursorShape>,
 }
 
