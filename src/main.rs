@@ -1213,8 +1213,6 @@ impl Dispatch<WlDataSource, ()> for App {
                     // TODO: do i need to handle cases when n is not equal to len of data?
                     assert!(n as usize == data_offer.data.len());
                 }
-
-                state.quit = true;
             }
             Cancelled => {
                 state.quit = true;
