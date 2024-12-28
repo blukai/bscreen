@@ -1,21 +1,53 @@
-[package]
-name = "bscreen"
-version = "0.0.0"
+[workspace]
+resolver = "2"
+members = ["wayland-scanner"]
+
+[workspace.package]
 edition = "2021"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1.0"
-env_logger = "0.11"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
+gl_generator = "0.14"
 glam = "0.29"
 libc = "0.2"
 log = "0.4"
 png = "0.17"
-wayland-backend = { version = "0.3", features = ["dlopen", "client_system"] }
-wayland-client = { version = "0.31", features = ["log"] }
-wayland-cursor = "0.31"
-wayland-egl = "0.32"
-wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+quick-xml = { version = "0.37", features = ["serialize", "overlapped-lists"] }
+serde = { version = "1.0", features = ["derive"] }
+# wayland-backend = { version = "0.3", features = ["dlopen", "client_system"] }
+# wayland-client = { version = "0.31", features = ["log"] }
+# wayland-cursor = "0.31"
+# wayland-egl = "0.32"
+# wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
+# wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-scanner = { path = "./wayland-scanner" }
+
+[package]
+name = "bscreen"
+version = "0.0.0"
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+env_logger.workspace = true
+glam.workspace = true
+libc.workspace = true
+log.workspace = true
+png.workspace = true
+# wayland-backend.workspace = true
+# wayland-client.workspace = true
+# wayland-cursor.workspace = true
+# wayland-egl.workspace = true
+# wayland-protocols.workspace = true
+# wayland-protocols-wlr.workspace = true
 
 [build-dependencies]
-gl_generator = "0.14"
+anyhow.workspace = true
+gl_generator.workspace = true
+wayland-scanner.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+wayland-scanner.workspace = true
+

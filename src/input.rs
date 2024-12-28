@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use glam::Vec2;
 
 // https://github.com/torvalds/linux/blob/231825b2e1ff6ba799c5eaf396d3ab2354e37c6b/include/uapi/linux/input-event-codes.h#L76
@@ -108,4 +110,29 @@ impl CursorShape {
 pub enum Event {
     Keyboard(KeyboardEvent),
     Pointer(PointerEvent),
+}
+
+#[derive(PartialEq, Eq, Hash)]
+pub enum SerialType {
+    KeyboardEnter,
+    PointerEnter,
+}
+
+#[derive(Default)]
+pub struct SerialTracker {
+    serial_map: HashMap<SerialType, u32>,
+}
+
+impl SerialTracker {
+    pub fn update_serial(&mut self, ty: SerialType, serial: u32) {
+        self.serial_map.insert(ty, serial);
+    }
+
+    pub fn reset_serial(&mut self, ty: SerialType) {
+        self.serial_map.remove(&ty);
+    }
+
+    pub fn get_serial(&self, ty: SerialType) -> Option<u32> {
+        self.serial_map.get(&ty).cloned()
+    }
 }

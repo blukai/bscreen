@@ -9,36 +9,12 @@ use crate::{
 };
 
 pub mod sys {
-    #[allow(non_camel_case_types)]
     #[allow(clippy::all)]
     mod generated {
         include!(concat!(env!("OUT_DIR"), "/gl_bindings.rs"));
     }
 
     pub use generated::*;
-}
-
-struct TextureFormatDescriptor {
-    internalformat: sys::types::GLint,
-    format: sys::types::GLenum,
-    ty: sys::types::GLenum,
-}
-
-fn describe_texture_format(format: gfx::TextureFormat) -> TextureFormatDescriptor {
-    use gfx::TextureFormat::*;
-    match format {
-        // https://gitlab.freedesktop.org/wlroots/wlroots/-/blob/3fdbfb0be82224d472ad6de3a91813064f4cd4b2/render/gles2/pixel_format.c
-        Bgra8Unorm => TextureFormatDescriptor {
-            internalformat: sys::BGRA_EXT as _,
-            format: sys::BGRA_EXT,
-            ty: sys::UNSIGNED_BYTE,
-        },
-        Rgba8Unorm => TextureFormatDescriptor {
-            internalformat: sys::RGBA as _,
-            format: sys::RGBA,
-            ty: sys::UNSIGNED_BYTE,
-        },
-    }
 }
 
 pub struct Lib {
@@ -64,6 +40,33 @@ impl Lib {
         });
 
         Self { gl }
+    }
+
+    pub fn leak(self) -> &'static Self {
+        Box::leak(Box::new(self))
+    }
+}
+
+struct TextureFormatDescriptor {
+    internalformat: sys::types::GLint,
+    format: sys::types::GLenum,
+    ty: sys::types::GLenum,
+}
+
+fn describe_texture_format(format: gfx::TextureFormat) -> TextureFormatDescriptor {
+    use gfx::TextureFormat::*;
+    match format {
+        // https://gitlab.freedesktop.org/wlroots/wlroots/-/blob/3fdbfb0be82224d472ad6de3a91813064f4cd4b2/render/gles2/pixel_format.c
+        Bgra8Unorm => TextureFormatDescriptor {
+            internalformat: sys::BGRA_EXT as _,
+            format: sys::BGRA_EXT,
+            ty: sys::UNSIGNED_BYTE,
+        },
+        Rgba8Unorm => TextureFormatDescriptor {
+            internalformat: sys::RGBA as _,
+            format: sys::RGBA,
+            ty: sys::UNSIGNED_BYTE,
+        },
     }
 }
 

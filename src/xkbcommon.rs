@@ -1,13 +1,11 @@
 #![allow(non_camel_case_types)]
 
 use std::ffi::{c_char, c_int};
-use std::marker::{PhantomData, PhantomPinned};
-use std::os::fd::{AsRawFd, BorrowedFd};
 use std::ptr::null_mut;
 
 use anyhow::anyhow;
 
-use crate::dynlib::{opaque_struct, DynLib};
+use crate::dynlib::{DynLib, opaque_struct};
 use crate::input::KeyboardMods;
 
 pub const XKB_MOD_NAME_CTRL: &[u8] = b"Control\0";
@@ -86,7 +84,7 @@ pub struct Lib {
 }
 
 impl Lib {
-    pub unsafe fn load() -> Result<Self, String> {
+    pub fn load() -> anyhow::Result<Self> {
         let lib = DynLib::open(b"libxkbcommon.so\0")
             .or_else(|_| DynLib::open(b"libxkbcommon.so.0\0"))
             .or_else(|_| DynLib::open(b"libxkbcommon.so.0.0.0\0"))?;
@@ -102,6 +100,10 @@ impl Lib {
             xkb_state_update_mask: lib.lookup(b"xkb_state_update_mask\0")?,
             _lib: lib,
         })
+    }
+
+    pub(crate) fn leak(self) -> &'static Self {
+        Box::leak(Box::new(self))
     }
 }
 
@@ -122,7 +124,7 @@ pub struct Context {
 impl Context {
     pub unsafe fn from_fd(
         xkbcommon_lib: &'static Lib,
-        fd: BorrowedFd,
+        fd: c_int,
         size: u32,
     ) -> anyhow::Result<Self> {
         let context = (xkbcommon_lib.xkb_context_new)(xkb_context_flags::XKB_CONTEXT_NO_FLAGS);
@@ -135,7 +137,7 @@ impl Context {
             size as _,
             libc::PROT_READ,
             libc::MAP_PRIVATE,
-            fd.as_raw_fd(),
+            fd,
             0,
         );
         // defer posix.munmap(keymap_string);

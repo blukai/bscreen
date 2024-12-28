@@ -2,6 +2,7 @@ use std::ffi::{c_char, c_void};
 use std::mem::zeroed;
 use std::ops::Deref;
 use std::ptr::{null, null_mut};
+use std::rc::Rc;
 
 use anyhow::{anyhow, Context as _};
 
@@ -64,7 +65,7 @@ impl Deref for Lib {
 }
 
 impl Lib {
-    pub unsafe fn load() -> Result<Self, String> {
+    pub unsafe fn load() -> anyhow::Result<Self> {
         let lib = DynLib::open(b"libEGL.so\0").or_else(|_| DynLib::open(b"libEGL.so.1\0"))?;
 
         #[allow(non_snake_case)]
@@ -81,6 +82,10 @@ impl Lib {
         });
 
         Ok(Self { _lib: lib, egl })
+    }
+
+    pub fn leak(self) -> &'static Self {
+        Box::leak(Box::new(self))
     }
 
     pub fn unwrap_err(&self) -> Error {
@@ -204,14 +209,12 @@ impl Context {
             return Err(egl_lib.unwrap_err()).context("could not create context");
         }
 
-        let egl_context = Context {
+        Ok(Context {
             egl_lib,
             display,
             config,
             context,
-        };
-        egl_context.make_current_surfaceless()?;
-        Ok(egl_context)
+        })
     }
 }
 
@@ -225,14 +228,14 @@ impl Drop for Context {
 
 pub struct ImageKhr {
     egl_lib: &'static Lib,
-    egl_context: &'static Context,
+    egl_context: Rc<Context>,
     pub handle: sys::types::EGLImageKHR,
 }
 
 impl ImageKhr {
     pub unsafe fn new(
         egl_lib: &'static Lib,
-        egl_context: &'static Context,
+        egl_context: &Rc<Context>,
         gl_texture: &Texture2D,
     ) -> anyhow::Result<Self> {
         let image = unsafe {
@@ -249,7 +252,7 @@ impl ImageKhr {
         }
         Ok(Self {
             egl_lib,
-            egl_context,
+            egl_context: Rc::clone(egl_context),
             handle: image,
         })
     }
@@ -266,14 +269,14 @@ impl Drop for ImageKhr {
 
 pub struct WindowSurface {
     egl_lib: &'static Lib,
-    egl_context: &'static Context,
+    egl_context: Rc<Context>,
     pub handle: sys::types::EGLSurface,
 }
 
 impl WindowSurface {
     pub unsafe fn new(
         egl_lib: &'static Lib,
-        egl_context: &'static Context,
+        egl_context: &Rc<Context>,
         window_id: sys::EGLNativeWindowType,
     ) -> anyhow::Result<Self> {
         let window_surface =
@@ -283,7 +286,7 @@ impl WindowSurface {
         }
         Ok(Self {
             egl_lib,
-            egl_context,
+            egl_context: Rc::clone(egl_context),
             handle: window_surface,
         })
     }
