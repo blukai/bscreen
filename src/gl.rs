@@ -1,11 +1,10 @@
 use std::{ops::Deref, ptr::null};
 
 use anyhow::anyhow;
-use glam::Vec2;
 
 use crate::{
     egl,
-    gfx::{self, Rect, Size},
+    gfx::{self, Rect, Size, Vec2},
 };
 
 pub mod sys {

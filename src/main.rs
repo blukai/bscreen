@@ -22,8 +22,7 @@ use std::{
 
 use anyhow::{Context as _, anyhow};
 use crop::Crop;
-use gfx::{DrawBuffer, Rect, RectFill, Size};
-use glam::Vec2;
+use gfx::{DrawBuffer, Rect, RectFill, Size, Vec2};
 use input::{Event, KeyboardEventKind, Scancode, SerialType};
 use renderer::Renderer;
 
@@ -93,7 +92,7 @@ impl Screen {
 
         let fractional_scale = overlay.fractional_scale.unwrap_or(1.0);
         let logical_size = overlay.logical_size.unwrap();
-        let view_rect = Rect::new(Vec2::ZERO, logical_size.as_uvec2().as_vec2());
+        let view_rect = Rect::new(Vec2::ZERO, logical_size.as_vec2());
 
         let window_surface = overlay.window_surface.as_ref().unwrap();
         let dmabuf = screencopy.dmabuf.as_ref().unwrap();
@@ -266,7 +265,7 @@ impl App {
                 }
 
                 let logical_size = overlay.logical_size.unwrap();
-                let view_rect = Rect::new(Vec2::ZERO, logical_size.as_uvec2().as_vec2());
+                let view_rect = Rect::new(Vec2::ZERO, logical_size.as_vec2());
                 let crop_updated = screen.crop.update(view_rect, &event);
 
                 if let Some(cursor_shape) = screen.crop.cursor {

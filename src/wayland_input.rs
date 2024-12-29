@@ -6,10 +6,10 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
-use glam::Vec2;
 
 use crate::{
     Connection,
+    gfx::Vec2,
     input::{
         CursorShape, Event, KeyboardEvent, KeyboardEventKind, PointerButton, PointerButtons,
         PointerEvent, PointerEventKind, Scancode, SerialTracker, SerialType,

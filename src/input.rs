@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use glam::Vec2;
+use crate::gfx::Vec2;
 
 // https://github.com/torvalds/linux/blob/231825b2e1ff6ba799c5eaf396d3ab2354e37c6b/include/uapi/linux/input-event-codes.h#L76
 

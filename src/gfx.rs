@@ -1,5 +1,3 @@
-use glam::{UVec2, Vec2};
-
 // NOTE: TextureFormat is modeled after webgpu, see:
 // - https://github.com/webgpu-native/webgpu-headers/blob/449359147fae26c07efe4fece25013df396287db/webgpu.h
 // - https://www.w3.org/TR/webgpu/#texture-formats
@@ -9,6 +7,131 @@ pub enum TextureFormat {
     // wasted).
     Bgra8Unorm,
     Rgba8Unorm,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct Vec2 {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl std::ops::Add<Vec2> for Vec2 {
+    type Output = Self;
+
+    #[inline]
+    fn add(self, rhs: Self) -> Self {
+        Self {
+            x: self.x.add(rhs.x),
+            y: self.y.add(rhs.y),
+        }
+    }
+}
+
+impl std::ops::Sub<Vec2> for Vec2 {
+    type Output = Self;
+
+    #[inline]
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self {
+            x: self.x.sub(rhs.x),
+            y: self.y.sub(rhs.y),
+        }
+    }
+}
+
+impl std::ops::Mul<Vec2> for Vec2 {
+    type Output = Self;
+
+    #[inline]
+    fn mul(self, rhs: Self) -> Self {
+        Self {
+            x: self.x.mul(rhs.x),
+            y: self.y.mul(rhs.y),
+        }
+    }
+}
+
+impl std::ops::Div<Vec2> for Vec2 {
+    type Output = Self;
+
+    #[inline]
+    fn div(self, rhs: Self) -> Self {
+        Self {
+            x: self.x.div(rhs.x),
+            y: self.y.div(rhs.y),
+        }
+    }
+}
+
+impl std::ops::Mul<f32> for Vec2 {
+    type Output = Self;
+
+    #[inline]
+    fn mul(self, rhs: f32) -> Self {
+        Self {
+            x: self.x.mul(rhs),
+            y: self.y.mul(rhs),
+        }
+    }
+}
+
+impl std::ops::Div<f32> for Vec2 {
+    type Output = Self;
+
+    #[inline]
+    fn div(self, rhs: f32) -> Self {
+        Self {
+            x: self.x.div(rhs),
+            y: self.y.div(rhs),
+        }
+    }
+}
+
+impl Vec2 {
+    pub const ZERO: Self = Self::splat(0.0);
+
+    #[inline]
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+
+    #[inline]
+    pub const fn splat(v: f32) -> Self {
+        Self { x: v, y: v }
+    }
+
+    #[inline]
+    pub fn dot(self, rhs: Self) -> f32 {
+        (self.x * rhs.x) + (self.y * rhs.y)
+    }
+
+    /// computes the length (magnitude) of the vector.
+    #[inline]
+    pub fn length(self) -> f32 {
+        f32::sqrt(self.dot(self))
+    }
+
+    /// returns `self` normalized to length 1 if possible, else returns zero.
+    /// in particular, if the input is zero, or non-finite, the result of
+    /// this operation will be zero.
+    #[inline]
+    pub fn normalize_or_zero(self) -> Self {
+        // reciprocal is also called multiplicative inverse
+        let reciprocal_length = 1.0 / self.length();
+        if reciprocal_length.is_finite() && reciprocal_length > 0.0 {
+            self * reciprocal_length
+        } else {
+            Self::splat(0.0)
+        }
+    }
+
+    #[inline]
+    pub fn perp(self) -> Self {
+        Self {
+            x: -self.y,
+            y: self.x,
+        }
+    }
 }
 
 // NOTE: my definition of logical size matches wayland. but my defintion of
@@ -42,8 +165,8 @@ impl Size {
     }
 
     #[inline]
-    pub fn as_uvec2(&self) -> UVec2 {
-        UVec2::new(self.width, self.height)
+    pub fn as_vec2(&self) -> Vec2 {
+        Vec2::new(self.width as f32, self.height as f32)
     }
 }
 
@@ -147,7 +270,7 @@ impl Rect {
     }
 
     pub fn translate(&self, delta: &Vec2) -> Self {
-        Self::new(self.min + delta, self.max + delta)
+        Self::new(self.min + *delta, self.max + *delta)
     }
 
     pub fn width(&self) -> f32 {
@@ -185,7 +308,7 @@ pub enum RectFill {
 fn compute_line_width_offset(a: &Vec2, b: &Vec2, width: f32) -> Vec2 {
     // direction defines how the line is oriented in space. it allows to know
     // which way to move the vertices to create the desired thickness.
-    let dir: Vec2 = b - a;
+    let dir: Vec2 = *b - *a;
 
     // normalizing the direction vector converts it into a unit vector (length
     // of 1). normalization ensures that the offset is proportional to the line

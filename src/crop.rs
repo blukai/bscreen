@@ -1,7 +1,5 @@
-use glam::Vec2;
-
 use crate::{
-    gfx::{DrawBuffer, Rect, RectFill},
+    gfx::{DrawBuffer, Rect, RectFill, Vec2},
     input::{CursorShape, Event, PointerEventKind},
 };
 
