@@ -1,6 +1,6 @@
 use std::io;
 
-use crate::deserialize::{Arg, ArgType, Interface, Message};
+use crate::protocol::*;
 
 // is_nullable_type
 fn arg_type_nullable(arg_type: ArgType) -> bool {
