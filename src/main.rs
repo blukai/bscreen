@@ -254,13 +254,13 @@ impl App {
                 let screen = &mut self.screens[i];
                 let overlay = screen.overlay.as_ref().unwrap();
 
+                // NOTE: keyboard surface id may not match with pointer surface id; i want to
+                // operate on pointer-focused surface.
                 let screen_surface_id = wayland_input::get_surface_id(overlay.surface);
-                let event_surface_id = match event {
-                    Event::Keyboard(ref kev) => kev.surface_id,
-                    Event::Pointer(ref pev) => pev.surface_id,
+                let Some(pointer_surface_id) = self.input.pointer_focused_surface_id else {
+                    continue;
                 };
-
-                if screen_surface_id != event_surface_id {
+                if screen_surface_id != pointer_surface_id {
                     continue;
                 }
 

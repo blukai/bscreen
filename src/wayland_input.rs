@@ -26,11 +26,11 @@ pub struct Input {
 
     keyboard: NonNull<wayland::wl_keyboard>,
     xkb_context: Option<xkbcommon::Context>,
-    keyboard_focused_surface_id: Option<u64>,
+    pub keyboard_focused_surface_id: Option<u64>,
 
     pointer: NonNull<wayland::wl_pointer>,
     pointer_position: Vec2,
-    pointer_focused_surface_id: Option<u64>,
+    pub pointer_focused_surface_id: Option<u64>,
     pointer_buttons: PointerButtons,
     pointer_frame_events: VecDeque<PointerEvent>,
     cursor_theme: NonNull<wayland_cursor::wl_cursor_theme>,
@@ -72,18 +72,25 @@ unsafe extern "C" fn handle_keyboard_enter(
     surface: *mut wayland::wl_surface,
     _keys: *mut wayland::wl_array,
 ) {
-    log::debug!("wl_keyboard.enter");
-
     let Some(surface) = NonNull::new(surface) else {
         log::warn!("recieved keyboard enter event with null surface");
         return;
     };
+
+    log::debug!("wl_keyboard.enter (surface_id {})", get_surface_id(surface));
 
     let input = &mut *(data as *mut Input);
     input.keyboard_focused_surface_id = Some(get_surface_id(surface));
     input
         .serial_tracker
         .update_serial(SerialType::KeyboardEnter, serial);
+
+    let keyboard_event = KeyboardEvent {
+        kind: KeyboardEventKind::Enter,
+        surface_id: input.keyboard_focused_surface_id.unwrap(),
+        mods: input.xkb_context.as_ref().unwrap().mods.clone(),
+    };
+    input.events.push_back(Event::Keyboard(keyboard_event));
 }
 
 unsafe extern "C" fn handle_keyboard_leave(
@@ -95,6 +102,14 @@ unsafe extern "C" fn handle_keyboard_leave(
     log::debug!("wl_keyboard.leave");
 
     let input = &mut *(data as *mut Input);
+
+    let keyboard_event = KeyboardEvent {
+        kind: KeyboardEventKind::Leave,
+        surface_id: input.keyboard_focused_surface_id.unwrap(),
+        mods: input.xkb_context.as_ref().unwrap().mods.clone(),
+    };
+    input.events.push_back(Event::Keyboard(keyboard_event));
+
     input.keyboard_focused_surface_id = None;
     input.serial_tracker.reset_serial(SerialType::KeyboardEnter);
 }
@@ -164,21 +179,35 @@ unsafe extern "C" fn handle_pointer_enter(
     _wl_pointer: *mut wayland::wl_pointer,
     serial: u32,
     surface: *mut wayland::wl_surface,
-    _surface_x: wayland::wl_fixed,
-    _surface_y: wayland::wl_fixed,
+    surface_x: wayland::wl_fixed,
+    surface_y: wayland::wl_fixed,
 ) {
-    log::debug!("wl_pointer.enter");
-
     let Some(surface) = NonNull::new(surface) else {
         log::warn!("recieved pointer enter event with null surface");
         return;
     };
+
+    log::debug!("wl_pointer.enter (surface_id {})", get_surface_id(surface));
 
     let input = &mut *(data as *mut Input);
     input.pointer_focused_surface_id = Some(get_surface_id(surface));
     input
         .serial_tracker
         .update_serial(SerialType::PointerEnter, serial);
+
+    let position = Vec2::new(
+        wayland::wl_fixed_to_f32(surface_x),
+        wayland::wl_fixed_to_f32(surface_y),
+    );
+    input.pointer_position = position;
+
+    let frame_event = PointerEvent {
+        kind: PointerEventKind::Enter,
+        surface_id: input.pointer_focused_surface_id.unwrap(),
+        position,
+        buttons: input.pointer_buttons.clone(),
+    };
+    input.pointer_frame_events.push_back(frame_event);
 }
 
 unsafe extern "C" fn handle_pointer_leave(
@@ -190,6 +219,15 @@ unsafe extern "C" fn handle_pointer_leave(
     log::debug!("wl_pointer.leave");
 
     let input = &mut *(data as *mut Input);
+
+    let frame_event = PointerEvent {
+        kind: PointerEventKind::Leave,
+        surface_id: input.pointer_focused_surface_id.unwrap(),
+        position: input.pointer_position,
+        buttons: input.pointer_buttons.clone(),
+    };
+    input.pointer_frame_events.push_back(frame_event);
+
     input.pointer_focused_surface_id = None;
     input.serial_tracker.reset_serial(SerialType::PointerEnter);
 }

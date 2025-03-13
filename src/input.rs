@@ -5,6 +5,7 @@ use crate::gfx::Vec2;
 // https://github.com/torvalds/linux/blob/231825b2e1ff6ba799c5eaf396d3ab2354e37c6b/include/uapi/linux/input-event-codes.h#L76
 
 const KEY_ESC: u32 = 1;
+const KEY_A: u32 = 30;
 const KEY_C: u32 = 46;
 
 const BTN_LEFT: u32 = 0x110;
@@ -12,6 +13,7 @@ const BTN_LEFT: u32 = 0x110;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Scancode {
     Esc,
+    A,
     C,
     Unidentified(u32),
 }
@@ -20,6 +22,7 @@ impl Scancode {
     pub fn from_int(int: u32) -> Scancode {
         match int {
             KEY_ESC => Self::Esc,
+            KEY_A => Self::A,
             KEY_C => Self::C,
             _ => Self::Unidentified(int),
         }
@@ -36,6 +39,8 @@ pub struct KeyboardMods {
 pub enum KeyboardEventKind {
     Press { scancode: Scancode },
     Release { scancode: Scancode },
+    Enter,
+    Leave,
 }
 
 #[derive(Debug)]
@@ -71,6 +76,8 @@ pub enum PointerEventKind {
     Motion { delta: Vec2 },
     Press { button: PointerButton },
     Release { button: PointerButton },
+    Enter,
+    Leave,
 }
 
 #[derive(Debug)]
