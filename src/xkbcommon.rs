@@ -18,6 +18,7 @@ pub type xkb_layout_index_t = u32;
 pub type xkb_mod_index_t = u32;
 pub type xkb_mod_mask_t = u32;
 
+#[expect(dead_code)]
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum xkb_context_flags {
@@ -25,6 +26,8 @@ pub enum xkb_context_flags {
     XKB_CONTEXT_NO_DEFAULT_INCLUDES = (1 << 0),
     XKB_CONTEXT_NO_ENVIRONMENT_NAMES = (1 << 1),
 }
+
+#[expect(dead_code)]
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum xkb_keymap_format {
@@ -38,6 +41,7 @@ pub enum xkb_keymap_compile_flags {
     XKB_KEYMAP_COMPILE_NO_FLAGS = 0,
 }
 
+#[expect(dead_code)]
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum xkb_state_component {
@@ -199,6 +203,16 @@ impl Context {
                 self.mod_indices.ctrl,
                 xkb_state_component::XKB_STATE_MODS_EFFECTIVE,
             ) == 1;
+        }
+    }
+}
+
+impl Drop for Context {
+    fn drop(&mut self) {
+        unsafe {
+            (self.xkbcommon.xkb_state_unref)(self.state);
+            (self.xkbcommon.xkb_keymap_unref)(self.keymap);
+            (self.xkbcommon.xkb_context_unref)(self.context);
         }
     }
 }

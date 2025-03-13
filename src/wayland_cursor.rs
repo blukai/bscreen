@@ -25,6 +25,7 @@ pub struct wl_cursor {
     pub name: *const c_char,
 }
 
+#[expect(dead_code)]
 pub struct Lib {
     pub wl_cursor_theme_load: unsafe extern "C" fn(
         name: *const c_char,

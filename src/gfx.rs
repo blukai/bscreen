@@ -181,10 +181,6 @@ pub struct Rgba8 {
 
 impl Rgba8 {
     pub const WHITE: Self = Self::new(u8::MAX, u8::MAX, u8::MAX, u8::MAX);
-    pub const BLACK: Self = Self::new(u8::MIN, u8::MIN, u8::MIN, u8::MAX);
-    pub const RED: Self = Self::new(u8::MAX, u8::MIN, u8::MIN, u8::MAX);
-    pub const GREEN: Self = Self::new(u8::MIN, u8::MAX, u8::MIN, u8::MAX);
-    pub const BLUE: Self = Self::new(u8::MIN, u8::MIN, u8::MAX, u8::MAX);
 
     #[inline]
     pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
@@ -283,10 +279,6 @@ impl Rect {
 
     pub fn size(&self) -> Vec2 {
         self.max - self.min
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.width() <= 0.0 || self.height() <= 0.0
     }
 }
 

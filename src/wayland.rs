@@ -53,6 +53,7 @@ pub fn wl_fixed_to_f32(f: wl_fixed) -> f32 {
     (f as f32) / 256.0
 }
 
+#[expect(dead_code)]
 pub struct Lib {
     pub wl_display_connect: unsafe extern "C" fn(name: *const c_char) -> *mut wl_display,
     pub wl_display_disconnect: unsafe extern "C" fn(display: *mut wl_display) -> *mut c_void,
