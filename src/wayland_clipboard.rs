@@ -1,10 +1,10 @@
 use std::{
-    ffi::{CStr, CString, c_char, c_void},
+    ffi::{CStr, CString, c_char, c_int, c_void},
     ptr::NonNull,
     rc::Rc,
 };
 
-use anyhow::Context as _;
+use anyhow::{Context as _, anyhow};
 
 use crate::{Connection, wayland};
 
@@ -21,6 +21,23 @@ pub struct Clipboard {
     data_offer: Option<ClipboardDataOffer>,
 
     pub cancelled: bool,
+}
+
+unsafe fn write_all(fd: c_int, buf: *const c_void, count: libc::size_t) -> anyhow::Result<()> {
+    let mut pos = 0;
+    while pos < count {
+        let n = libc::write(fd, buf.byte_add(pos) as _, count - pos);
+        if n < 0 {
+            let errno = *libc::__errno_location();
+            if errno == libc::EAGAIN {
+                continue;
+            }
+            return Err(anyhow!("could not write, errno {}", errno));
+        }
+        pos += n as usize;
+    }
+
+    Ok(())
 }
 
 unsafe extern "C" fn handle_send(
@@ -42,9 +59,10 @@ unsafe extern "C" fn handle_send(
     let mime_type = CStr::from_ptr(mime_type);
     assert!(data_offer.mime_type.as_ref().eq(mime_type));
 
-    let n = libc::write(fd, data_offer.data.as_ptr() as _, data_offer.data.len());
-    // TODO: do i need to handle cases when n is not equal to len of data?
-    assert!(n as usize == data_offer.data.len());
+    if let Err(err) = write_all(fd, data_offer.data.as_ptr() as _, data_offer.data.len()) {
+        log::error!("write_all failed: {err:?}");
+        // do not do early return, fd must be closed.
+    }
     libc::close(fd);
 }
 
