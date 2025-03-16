@@ -77,17 +77,19 @@ unsafe extern "C" fn handle_keyboard_enter(
         return;
     };
 
-    log::debug!("wl_keyboard.enter (surface_id {})", get_surface_id(surface));
-
     let input = &mut *(data as *mut Input);
-    input.keyboard_focused_surface_id = Some(get_surface_id(surface));
+
+    let surface_id = get_surface_id(surface);
+    log::debug!("wl_keyboard.enter (surface_id {surface_id})");
+
+    input.keyboard_focused_surface_id = Some(surface_id);
     input
         .serial_tracker
         .update_serial(SerialType::KeyboardEnter, serial);
 
     let keyboard_event = KeyboardEvent {
         kind: KeyboardEventKind::Enter,
-        surface_id: input.keyboard_focused_surface_id.unwrap(),
+        surface_id,
         mods: input.xkb_context.as_ref().unwrap().mods.clone(),
     };
     input.events.push_back(Event::Keyboard(keyboard_event));
@@ -97,21 +99,27 @@ unsafe extern "C" fn handle_keyboard_leave(
     data: *mut c_void,
     _wl_keyboard: *mut wayland::wl_keyboard,
     _serial: u32,
-    _surface: *mut wayland::wl_surface,
+    surface: *mut wayland::wl_surface,
 ) {
-    log::debug!("wl_keyboard.leave");
+    let Some(surface) = NonNull::new(surface) else {
+        log::warn!("recieved keyboard leave event with null surface");
+        return;
+    };
 
     let input = &mut *(data as *mut Input);
 
-    let keyboard_event = KeyboardEvent {
-        kind: KeyboardEventKind::Leave,
-        surface_id: input.keyboard_focused_surface_id.unwrap(),
-        mods: input.xkb_context.as_ref().unwrap().mods.clone(),
-    };
-    input.events.push_back(Event::Keyboard(keyboard_event));
+    let surface_id = get_surface_id(surface);
+    log::debug!("wl_keyboard.leave (surface_id {surface_id}");
 
     input.keyboard_focused_surface_id = None;
     input.serial_tracker.reset_serial(SerialType::KeyboardEnter);
+
+    let keyboard_event = KeyboardEvent {
+        kind: KeyboardEventKind::Leave,
+        surface_id,
+        mods: input.xkb_context.as_ref().unwrap().mods.clone(),
+    };
+    input.events.push_back(Event::Keyboard(keyboard_event));
 }
 
 unsafe extern "C" fn handle_keyboard_key(
@@ -187,10 +195,12 @@ unsafe extern "C" fn handle_pointer_enter(
         return;
     };
 
-    log::debug!("wl_pointer.enter (surface_id {})", get_surface_id(surface));
-
     let input = &mut *(data as *mut Input);
-    input.pointer_focused_surface_id = Some(get_surface_id(surface));
+
+    let surface_id = get_surface_id(surface);
+    log::debug!("wl_pointer.enter (surface_id {surface_id})");
+
+    input.pointer_focused_surface_id = Some(surface_id);
     input
         .serial_tracker
         .update_serial(SerialType::PointerEnter, serial);
@@ -203,7 +213,7 @@ unsafe extern "C" fn handle_pointer_enter(
 
     let frame_event = PointerEvent {
         kind: PointerEventKind::Enter,
-        surface_id: input.pointer_focused_surface_id.unwrap(),
+        surface_id,
         position,
         buttons: input.pointer_buttons.clone(),
     };
@@ -214,22 +224,28 @@ unsafe extern "C" fn handle_pointer_leave(
     data: *mut c_void,
     _wl_pointer: *mut wayland::wl_pointer,
     _serial: u32,
-    _surface: *mut wayland::wl_surface,
+    surface: *mut wayland::wl_surface,
 ) {
-    log::debug!("wl_pointer.leave");
+    let Some(surface) = NonNull::new(surface) else {
+        log::warn!("recieved pointer leave event with null surface");
+        return;
+    };
 
     let input = &mut *(data as *mut Input);
 
+    let surface_id = get_surface_id(surface);
+    log::debug!("wl_pointer.leave (surface_id {surface_id})");
+
+    input.pointer_focused_surface_id = None;
+    input.serial_tracker.reset_serial(SerialType::PointerEnter);
+
     let frame_event = PointerEvent {
         kind: PointerEventKind::Leave,
-        surface_id: input.pointer_focused_surface_id.unwrap(),
+        surface_id,
         position: input.pointer_position,
         buttons: input.pointer_buttons.clone(),
     };
     input.pointer_frame_events.push_back(frame_event);
-
-    input.pointer_focused_surface_id = None;
-    input.serial_tracker.reset_serial(SerialType::PointerEnter);
 }
 
 unsafe extern "C" fn handle_pointer_motion(
