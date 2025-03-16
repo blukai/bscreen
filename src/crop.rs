@@ -9,6 +9,7 @@ pub mod theme {
     pub const HANDLE_SIZE: f32 = 13.0;
     pub const HANDLE_BG: Rgba8 = Rgba8::new(255, 255, 255, 128);
     pub const OUTLINE: Rgba8 = Rgba8::new(48, 92, 222, 255);
+    pub const OUTLINE_WIDTH: f32 = 1.0;
     pub const OUTSIDE_BG: Rgba8 = Rgba8::new(0, 0, 0, 128);
 }
 
@@ -203,11 +204,8 @@ impl Crop {
         // outline
         // ----
 
-        let outline_width = 1.0;
-        let outline_color = theme::OUTLINE;
-
         {
-            draw_buffer.push_rect_outlined(crop_rect, outline_width, outline_color);
+            draw_buffer.push_rect_outlined(crop_rect, theme::OUTLINE_WIDTH, theme::OUTLINE);
         }
 
         // corner handles
@@ -219,26 +217,26 @@ impl Crop {
             draw_buffer.push_rect(
                 top_left_rect_handle(&crop_rect),
                 Some(fill),
-                Some(outline_width),
-                Some(outline_color),
+                Some(theme::OUTLINE_WIDTH),
+                Some(theme::OUTLINE),
             );
             draw_buffer.push_rect(
                 top_right_rect_handle(&crop_rect),
                 Some(fill),
-                Some(outline_width),
-                Some(outline_color),
+                Some(theme::OUTLINE_WIDTH),
+                Some(theme::OUTLINE),
             );
             draw_buffer.push_rect(
                 bottom_right_rect_handle(&crop_rect),
                 Some(fill),
-                Some(outline_width),
-                Some(outline_color),
+                Some(theme::OUTLINE_WIDTH),
+                Some(theme::OUTLINE),
             );
             draw_buffer.push_rect(
                 bottom_left_rect_handle(&crop_rect),
                 Some(fill),
-                Some(outline_width),
-                Some(outline_color),
+                Some(theme::OUTLINE_WIDTH),
+                Some(theme::OUTLINE),
             );
         }
     }

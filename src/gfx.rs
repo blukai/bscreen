@@ -181,6 +181,7 @@ pub struct Rgba8 {
 
 impl Rgba8 {
     pub const WHITE: Self = Self::new(u8::MAX, u8::MAX, u8::MAX, u8::MAX);
+    pub const BLACK: Self = Self::new(u8::MIN, u8::MIN, u8::MIN, u8::MAX);
 
     #[inline]
     pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
