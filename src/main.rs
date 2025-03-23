@@ -1,10 +1,15 @@
 mod crop;
 mod dynlib;
 mod egl;
+mod fontprovider;
+mod fonttexturecache;
+mod genvec;
 mod gfx;
 mod gl;
 mod input;
+mod ntree;
 mod renderer;
+mod texturepacker;
 mod wayland;
 mod wayland_clipboard;
 mod wayland_cursor;
@@ -12,6 +17,7 @@ mod wayland_egl;
 mod wayland_input;
 mod wayland_overlay;
 mod wayland_screencopy;
+mod welcome;
 mod xkbcommon;
 
 use std::{
@@ -21,10 +27,14 @@ use std::{
 };
 
 use anyhow::{Context as _, anyhow};
-use crop::Crop;
+use crop::{Crop, CropUpdateData};
+use fontprovider::{Font, FontProvider};
+use fonttexturecache::FontTextureCache;
+use genvec::Handle;
 use gfx::{DrawBuffer, Rect, RectFill, Size, Vec2};
 use input::{Event, KeyboardEventKind, Scancode, SerialType};
 use renderer::Renderer;
+use welcome::{Welcome, WelcomeUpdateData};
 
 struct Libs {
     wayland: &'static wayland::Lib,
@@ -57,12 +67,12 @@ struct Connection {
 }
 
 struct Screen {
-    conn: Rc<Connection>,
     output: NonNull<wayland::wl_output>,
 
     screencopy: Option<Box<wayland_screencopy::Screencopy>>,
     overlay: Option<Box<wayland_overlay::Overlay>>,
 
+    welcome: Welcome,
     crop: Crop,
 }
 
@@ -80,62 +90,6 @@ impl Default for ScreenDrawOpts {
     }
 }
 
-impl Screen {
-    fn draw(
-        &self,
-        draw_buffer: &mut DrawBuffer,
-        renderer: &Renderer,
-        opts: &ScreenDrawOpts,
-    ) -> anyhow::Result<()> {
-        let screencopy = self.screencopy.as_ref().unwrap().as_ref();
-        let overlay = self.overlay.as_ref().unwrap();
-
-        let fractional_scale = overlay.fractional_scale.unwrap_or(1.0);
-        let logical_size = overlay.logical_size.unwrap();
-        let view_rect = Rect::new(Vec2::ZERO, logical_size.as_vec2());
-
-        let window_surface = overlay.window_surface.as_ref().unwrap();
-        let dmabuf = screencopy.dmabuf.as_ref().unwrap();
-
-        unsafe {
-            self.conn
-                .libs
-                .egl_context
-                .make_current(window_surface.handle)?;
-
-            self.conn.libs.gl.ClearColor(0.0, 0.0, 0.0, 0.0);
-            self.conn.libs.gl.Clear(gl::sys::COLOR_BUFFER_BIT);
-        }
-
-        draw_buffer.clear();
-
-        draw_buffer.push_rect_filled(view_rect, RectFill::TextureHandle(dmabuf.gl_texture.handle));
-
-        if opts.draw_crop_decorations {
-            if self.crop.crop_rect.is_some() {
-                self.crop.draw(draw_buffer);
-            } else {
-                draw_buffer.push_rect_filled(view_rect, RectFill::Color(crop::theme::OUTSIDE_BG));
-            }
-        }
-
-        unsafe {
-            renderer.draw(logical_size, fractional_scale, draw_buffer);
-        }
-
-        if opts.swap_buffers {
-            unsafe {
-                self.conn
-                    .libs
-                    .egl_context
-                    .swap_buffers(window_surface.handle)?;
-            }
-        }
-
-        Ok(())
-    }
-}
-
 struct App {
     input: Box<wayland_input::Input>,
     clipboard: Box<wayland_clipboard::Clipboard>,
@@ -143,6 +97,10 @@ struct App {
     renderer: Renderer,
     screens: Vec<Screen>,
     conn: Rc<Connection>,
+
+    font_provider: FontProvider,
+    font_texture_cache: FontTextureCache,
+    font_handle: Handle<Font>,
 
     quit_requested: bool,
     copy_requested: bool,
@@ -154,12 +112,12 @@ impl App {
         self.screens.reserve_exact(self.conn.globals.outputs.len());
         for output in self.conn.globals.outputs.iter() {
             self.screens.push(Screen {
-                conn: Rc::clone(&self.conn),
                 output: NonNull::new(*output).context("whoopsie, output is null")?,
 
                 screencopy: None,
                 overlay: None,
 
+                welcome: Welcome::default(),
                 crop: Crop::default(),
             });
         }
@@ -224,8 +182,8 @@ impl App {
         }
 
         let screen_draw_opts = ScreenDrawOpts::default();
-        for screen in self.screens.iter() {
-            screen.draw(&mut self.draw_buffer, &self.renderer, &screen_draw_opts)?;
+        for i in 0..self.screens.len() {
+            self.draw_screen_at_index(i, &screen_draw_opts)?;
             // TODO: request frame
         }
 
@@ -251,7 +209,13 @@ impl App {
             }
 
             for i in 0..self.screens.len() {
-                let screen = &mut self.screens[i];
+                // NOTE: this is ugly, but i don't really care.
+                //
+                // i want to be able to iterate all the screens and remove crops from other screens
+                // that weren't updated.
+                // to ensure that this one will not be updated i check i == j.
+                let screen = unsafe { &mut *(&mut self.screens[i] as *mut _) as &mut Screen };
+
                 let overlay = screen.overlay.as_ref().unwrap();
 
                 // NOTE: keyboard surface id may not match with pointer surface id; i want to
@@ -260,28 +224,111 @@ impl App {
                 let Some(pointer_surface_id) = self.input.pointer_focused_surface_id else {
                     continue;
                 };
-                if screen_surface_id != pointer_surface_id {
-                    continue;
-                }
+                let this_screen_focused = screen_surface_id == pointer_surface_id;
 
                 let logical_size = overlay.logical_size.unwrap();
                 let view_rect = Rect::new(Vec2::ZERO, logical_size.as_vec2());
-                let crop_updated = screen.crop.update(view_rect, &event);
 
-                if let Some(cursor_shape) = screen.crop.cursor {
-                    self.input.set_cursor_shape(cursor_shape)?;
-                }
+                if this_screen_focused {
+                    let crop_updated = screen.crop.update(&event, CropUpdateData { view_rect });
 
-                if crop_updated {
-                    // remove crops from other screens
-                    for j in 0..self.screens.len() {
-                        if i == j {
-                            continue;
+                    if let Some(cursor_shape) = screen.crop.cursor {
+                        self.input.set_cursor_shape(cursor_shape)?;
+                    }
+
+                    if crop_updated {
+                        // remove crops from other screens
+                        for j in 0..self.screens.len() {
+                            if i == j {
+                                continue;
+                            }
+                            let other_screen = &mut self.screens[j];
+                            other_screen.crop.crop_rect = None;
                         }
-                        let other_screen = &mut self.screens[j];
-                        other_screen.crop.crop_rect = None;
                     }
                 }
+
+                screen.welcome.update(&event, WelcomeUpdateData {
+                    view_rect,
+                    any_crop_has_selection: self
+                        .screens
+                        .iter()
+                        .any(|screen| screen.crop.crop_rect.is_some()),
+                    this_screen_focused,
+                    font_provider: &self.font_provider,
+                    font_handle: self.font_handle,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn draw_screen_at_index(
+        &mut self,
+        index: usize,
+        draw_opts: &ScreenDrawOpts,
+    ) -> anyhow::Result<()> {
+        let screen = &mut self.screens[index];
+
+        let screencopy = screen.screencopy.as_ref().unwrap().as_ref();
+        let overlay = screen.overlay.as_ref().unwrap();
+
+        let fractional_scale = overlay.fractional_scale.unwrap_or(1.0);
+        let logical_size = overlay.logical_size.unwrap();
+        let view_rect = Rect::new(Vec2::ZERO, logical_size.as_vec2());
+
+        let window_surface = overlay.window_surface.as_ref().unwrap();
+        let dmabuf = screencopy.dmabuf.as_ref().unwrap();
+
+        unsafe {
+            self.conn
+                .libs
+                .egl_context
+                .make_current(window_surface.handle)?;
+
+            self.conn.libs.gl.ClearColor(0.0, 0.0, 0.0, 0.0);
+            self.conn.libs.gl.Clear(gl::sys::COLOR_BUFFER_BIT);
+        }
+
+        self.draw_buffer.clear();
+
+        self.draw_buffer
+            .push_rect_filled(view_rect, RectFill::Texture {
+                handle: dmabuf.gl_texture.handle,
+                coords: Rect::new(Vec2::splat(0.0), Vec2::splat(1.0)),
+            });
+
+        if draw_opts.draw_crop_decorations {
+            if screen.crop.crop_rect.is_some() {
+                screen.crop.draw(&mut self.draw_buffer);
+            } else {
+                // TODO: should this be state of the crop?
+                self.draw_buffer
+                    .push_rect_filled(view_rect, RectFill::Color(crop::theme::OUTSIDE_BG));
+            }
+        }
+
+        screen
+            .welcome
+            .draw(&mut self.draw_buffer, welcome::WelcomeDrawData {
+                font_provider: &self.font_provider,
+                font_texture_cache: &mut self.font_texture_cache,
+                font_handle: self.font_handle,
+                gl_lib: self.conn.libs.gl,
+            });
+
+        unsafe {
+            self.renderer
+                .draw(logical_size, fractional_scale, &self.draw_buffer);
+        }
+
+        if draw_opts.swap_buffers {
+            unsafe {
+                self.conn
+                    .libs
+                    .egl_context
+                    .swap_buffers(window_surface.handle)?;
             }
         }
 
@@ -289,8 +336,8 @@ impl App {
     }
 
     fn draw(&mut self, screen_draw_opts: ScreenDrawOpts) -> anyhow::Result<()> {
-        for screen in self.screens.iter() {
-            screen.draw(&mut self.draw_buffer, &self.renderer, &screen_draw_opts)?;
+        for i in 0..self.screens.len() {
+            self.draw_screen_at_index(i, &screen_draw_opts)?;
         }
         Ok(())
     }
@@ -320,13 +367,13 @@ impl App {
 
         // read pixels
         let (pixels, size) = {
-            let screen = &self.screens[screen_idx];
-            let overlay = screen.overlay.as_ref().unwrap();
-
-            screen.draw(&mut self.draw_buffer, &self.renderer, &ScreenDrawOpts {
+            self.draw_screen_at_index(screen_idx, &ScreenDrawOpts {
                 draw_crop_decorations: false,
                 swap_buffers: false,
             })?;
+
+            let screen = &self.screens[screen_idx];
+            let overlay = screen.overlay.as_ref().unwrap();
 
             let fractional_scale = overlay.fractional_scale.unwrap_or(1.0) as f32;
             let crop_rect = screen.crop.crop_rect.unwrap() * fractional_scale;
@@ -471,6 +518,12 @@ fn main() -> anyhow::Result<()> {
         globals: Globals::default(),
     });
 
+    let mut font_provider = FontProvider::default();
+    let font_handle = font_provider
+        .create_font(include_bytes!("../assets/JetBrainsMono-Regular.ttf"), 24.0)
+        .context("could not create font")?;
+    let font_texture_cache = FontTextureCache::default();
+
     unsafe {
         (wayland_lib.wl_proxy_add_listener)(
             wl_registry as *mut wayland::wl_proxy,
@@ -487,6 +540,10 @@ fn main() -> anyhow::Result<()> {
         renderer: unsafe { Renderer::new(gl_lib)? },
         screens: Vec::new(),
         conn,
+
+        font_provider,
+        font_handle,
+        font_texture_cache,
 
         quit_requested: false,
         copy_requested: false,

@@ -46,10 +46,12 @@ impl Lib {
     }
 }
 
-struct TextureFormatDescriptor {
-    internalformat: sys::types::GLint,
-    format: sys::types::GLenum,
-    ty: sys::types::GLenum,
+pub struct TextureFormatDescriptor {
+    pub internal_format: sys::types::GLint,
+    pub format: sys::types::GLenum,
+    pub ty: sys::types::GLenum,
+    // https://docs.vulkan.org/spec/latest/chapters/formats.html#texel-block-size
+    pub block_size: sys::types::GLint,
 }
 
 fn describe_texture_format(format: gfx::TextureFormat) -> TextureFormatDescriptor {
@@ -57,20 +59,29 @@ fn describe_texture_format(format: gfx::TextureFormat) -> TextureFormatDescripto
     match format {
         // https://gitlab.freedesktop.org/wlroots/wlroots/-/blob/3fdbfb0be82224d472ad6de3a91813064f4cd4b2/render/gles2/pixel_format.c
         Bgra8Unorm => TextureFormatDescriptor {
-            internalformat: sys::BGRA_EXT as _,
+            internal_format: sys::BGRA_EXT as _,
             format: sys::BGRA_EXT,
             ty: sys::UNSIGNED_BYTE,
+            block_size: 4,
         },
         Rgba8Unorm => TextureFormatDescriptor {
-            internalformat: sys::RGBA as _,
+            internal_format: sys::RGBA as _,
             format: sys::RGBA,
             ty: sys::UNSIGNED_BYTE,
+            block_size: 4,
+        },
+        R8Unorm => TextureFormatDescriptor {
+            internal_format: sys::LUMINANCE as _,
+            format: sys::LUMINANCE,
+            ty: sys::UNSIGNED_BYTE,
+            block_size: 1,
         },
     }
 }
 
 pub struct Texture2D {
     gl_lib: &'static Lib,
+    pub format_desc: TextureFormatDescriptor,
     pub handle: sys::types::GLuint,
 }
 
@@ -92,10 +103,13 @@ impl Texture2D {
         gl_lib.TexParameteri(sys::TEXTURE_2D, sys::TEXTURE_MAG_FILTER, sys::NEAREST as _);
 
         let format_desc = describe_texture_format(format);
+        // NOTE: this fixes tilting when rendering bitmaps. see
+        // https://stackoverflow.com/questions/15983607/opengl-texture-tilted.
+        gl_lib.PixelStorei(sys::UNPACK_ALIGNMENT, format_desc.block_size);
         gl_lib.TexImage2D(
             sys::TEXTURE_2D,
             0,
-            format_desc.internalformat,
+            format_desc.internal_format,
             width as _,
             height as _,
             0,
@@ -106,6 +120,7 @@ impl Texture2D {
 
         Self {
             gl_lib,
+            format_desc,
             handle: texture,
         }
     }

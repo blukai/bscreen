@@ -8,6 +8,7 @@ edition = "2021"
 [workspace.dependencies]
 anyhow = "1.0"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
+fontdue = "0.9"
 gl_generator = "0.14"
 libc = "0.2"
 log = "0.4"
@@ -23,6 +24,7 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 env_logger.workspace = true
+fontdue.workspace = true
 libc.workspace = true
 log.workspace = true
 png.workspace = true

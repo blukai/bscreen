@@ -7,6 +7,7 @@ pub enum TextureFormat {
     // wasted).
     Bgra8Unorm,
     Rgba8Unorm,
+    R8Unorm,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -132,6 +133,22 @@ impl Vec2 {
             y: self.x,
         }
     }
+
+    #[inline]
+    pub fn min(self, rhs: Self) -> Self {
+        Self {
+            x: self.x.min(rhs.x),
+            y: self.y.min(rhs.y),
+        }
+    }
+
+    #[inline]
+    pub fn max(self, rhs: Self) -> Self {
+        Self {
+            x: self.x.max(rhs.x),
+            y: self.y.max(rhs.y),
+        }
+    }
 }
 
 // NOTE: my definition of logical size matches wayland. but my defintion of
@@ -182,6 +199,7 @@ pub struct Rgba8 {
 impl Rgba8 {
     pub const WHITE: Self = Self::new(u8::MAX, u8::MAX, u8::MAX, u8::MAX);
     pub const BLACK: Self = Self::new(u8::MIN, u8::MIN, u8::MIN, u8::MAX);
+    pub const RED: Self = Self::new(u8::MAX, u8::MIN, u8::MIN, u8::MAX);
 
     #[inline]
     pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
@@ -291,9 +309,17 @@ impl std::ops::Mul<f32> for Rect {
     }
 }
 
+impl std::ops::Div<f32> for Rect {
+    type Output = Self;
+
+    fn div(self, factor: f32) -> Self::Output {
+        Self::new(self.min / factor, self.max / factor)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum RectFill {
-    TextureHandle(u32),
+    Texture { handle: u32, coords: Rect },
     Color(Rgba8),
 }
 
@@ -418,33 +444,41 @@ impl DrawBuffer {
     pub fn push_rect_filled(&mut self, rect: Rect, fill: RectFill) {
         let idx = self.vertices.len() as u32;
 
-        let (color, texture_handle) = match fill {
-            RectFill::Color(color) => (color, None),
-            RectFill::TextureHandle(texture_handle) => (Rgba8::WHITE, Some(texture_handle)),
+        let (color, tex_handle, tex_coords) = match fill {
+            RectFill::Color(color) => (color, None, None),
+            RectFill::Texture { handle, coords } => (Rgba8::WHITE, Some(handle), Some(coords)),
         };
 
         // top left
         self.push_vertex(Vertex {
             position: rect.top_left(),
-            tex_coord: Vec2::new(0.0, 0.0),
+            tex_coord: tex_coords
+                .map(|tc| tc.top_left())
+                .unwrap_or(Vec2::new(0.0, 0.0)),
             color,
         });
         // top right
         self.push_vertex(Vertex {
             position: rect.top_right(),
-            tex_coord: Vec2::new(1.0, 0.0),
+            tex_coord: tex_coords
+                .map(|tc| tc.top_right())
+                .unwrap_or(Vec2::new(1.0, 0.0)),
             color,
         });
         // bottom right
         self.push_vertex(Vertex {
             position: rect.bottom_right(),
-            tex_coord: Vec2::new(1.0, 1.0),
+            tex_coord: tex_coords
+                .map(|tc| tc.bottom_right())
+                .unwrap_or(Vec2::new(1.0, 1.0)),
             color,
         });
         // bottom left
         self.push_vertex(Vertex {
             position: rect.bottom_left(),
-            tex_coord: Vec2::new(0.0, 1.0),
+            tex_coord: tex_coords
+                .map(|tc| tc.bottom_left())
+                .unwrap_or(Vec2::new(0.0, 1.0)),
             color,
         });
 
@@ -453,7 +487,7 @@ impl DrawBuffer {
         // bottom right -> bottom left -> top left
         self.push_triangle(idx + 2, idx + 3, idx + 0);
 
-        self.commit(texture_handle);
+        self.commit(tex_handle);
     }
 
     pub fn push_rect_outlined(&mut self, rect: Rect, width: f32, color: Rgba8) {

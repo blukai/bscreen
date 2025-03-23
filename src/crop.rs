@@ -70,6 +70,10 @@ fn pointer_on_handle(rect: &Rect, pointer_position: &Vec2) -> Option<HandleType>
     None
 }
 
+pub struct CropUpdateData {
+    pub view_rect: Rect,
+}
+
 #[derive(Debug, Default)]
 pub struct Crop {
     pub view_rect: Option<Rect>,
@@ -79,8 +83,8 @@ pub struct Crop {
 }
 
 impl Crop {
-    pub fn update(&mut self, view_rect: Rect, event: &Event) -> bool {
-        self.view_rect = Some(view_rect);
+    pub fn update(&mut self, event: &Event, data: CropUpdateData) -> bool {
+        self.view_rect = Some(data.view_rect);
         let prev_crop_rect = self.crop_rect.clone();
 
         match event {
@@ -101,7 +105,7 @@ impl Crop {
                     }
                     PointerEventKind::Release { .. } => {
                         if let Some(crop_rect) = self.crop_rect.as_mut() {
-                            *crop_rect = crop_rect.normalize().constrain_to(&view_rect);
+                            *crop_rect = crop_rect.normalize().constrain_to(&data.view_rect);
                             let size = crop_rect.size();
                             if size.x < 1.0 || size.y < 1.0 {
                                 _ = self.crop_rect.take();
@@ -146,7 +150,7 @@ impl Crop {
                 KeyboardEventKind::Press {
                     scancode: Scancode::A,
                 } if keyboard_event.mods.ctrl => {
-                    self.crop_rect = Some(view_rect);
+                    self.crop_rect = Some(data.view_rect);
 
                     self.cursor = Some(CursorShape::Move);
                 }
@@ -157,7 +161,7 @@ impl Crop {
         !prev_crop_rect.eq(&self.crop_rect)
     }
 
-    pub fn draw(&self, draw_buffer: &mut DrawBuffer) {
+    pub fn draw(&mut self, draw_buffer: &mut DrawBuffer) {
         let Some(view_rect) = self.view_rect.as_ref() else {
             return;
         };
