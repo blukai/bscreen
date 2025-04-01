@@ -491,10 +491,10 @@ impl DrawBuffer {
     }
 
     pub fn push_rect_outlined(&mut self, rect: Rect, width: f32, color: Rgba8) {
-        let top_left = rect.min;
-        let top_right = Vec2::new(rect.max.x, rect.min.y);
-        let bottom_right = rect.max;
-        let bottom_left = Vec2::new(rect.min.x, rect.max.y);
+        let top_left = rect.top_left();
+        let top_right = rect.top_right();
+        let bottom_right = rect.bottom_right();
+        let bottom_left = rect.bottom_left();
 
         let offset = width * 0.5;
 
